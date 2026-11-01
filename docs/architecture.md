@@ -192,6 +192,9 @@ are limited to identifiers and closed literal/identifier argv arrays. A separate
 executable argument can be retained without inventing argv. Binding ambiguity,
 malformed call syntax and exhausted proof budgets still prevent promotion;
 unresolved commands do not produce shell behavior or downstream resource flow.
+Nonempty or unresolved process options also prevent command expansion because
+they can change the working directory, shell and program selection. Such calls
+retain only the proven API primitive with an explicit options limitation.
 
 A separate closed Node builtin adapter resolves immutable ESM and CommonJS
 bindings for selected `fs`, `fs/promises`, `os`, `dns`, and `dns/promises`
