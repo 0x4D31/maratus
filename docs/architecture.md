@@ -64,6 +64,18 @@ mounting by default.
 
 ## Execution model
 
+For native executables, bounded function analysis accepts `LC_MAIN` or one
+complete x86_64 `LC_UNIXTHREAD` general-register state. Legacy thread entries
+must map uniquely into executable, file-backed segment bytes. Duplicate or
+conflicting entry commands and unsupported thread layouts do not seed analysis.
+The declared entry remains static metadata; it does not establish that the
+program ran or connect an otherwise unselected artifact to a host root.
+
+When Mach-O preflight rejects retained bytes, the shared raw-observation lane
+may still report bounded heuristic URL and IP candidates. Those candidates have
+no architecture or function attribution and never create operations. The parse
+failure and raw-string boundary limitations remain explicit in coverage.
+
 An `ExecutionRoot` is a static starting point declared by an artifact format or
 a versioned host adapter. Examples include an app main executable, package
 install script, launchd command, npm lifecycle hook, Node package-root entry,

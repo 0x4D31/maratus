@@ -90,6 +90,11 @@ const (
 )
 
 func ExtractMachO(graph *behavior.Graph, content artifact.Content, options artifact.Options) {
+	rawFeatures := newRawFeatureExtractor()
+	extractMachOWithRawFeatures(graph, content, options, &rawFeatures)
+}
+
+func extractMachOWithRawFeatures(graph *behavior.Graph, content artifact.Content, options artifact.Options, rawFeatures *rawFeatureExtractor) {
 	isFat, slices, preflightErr := artifact.PreflightMachOSlices(content.Data)
 	if preflightErr != nil {
 		graph.AddCoverage(behavior.Coverage{
@@ -98,6 +103,9 @@ func ExtractMachO(graph *behavior.Graph, content artifact.Content, options artif
 			Status:       "partial",
 			Detail:       "Mach-O parse failed: structure validation rejected input before allocation: " + preflightErr.Error(),
 		})
+		content.SemanticCoverageArea = "macho-raw-fallback"
+		content.SemanticCoverageDetail = "Mach-O structure was rejected; only bounded heuristic URL and IP byte candidates were retained without architecture, function, call, or operation attribution"
+		rawFeatures.extract(graph, content)
 		return
 	}
 	if isFat {
@@ -386,7 +394,7 @@ func extractMachOFile(graph *behavior.Graph, content artifact.Content, file *mac
 	if scopedEvidence == 0 {
 		detail = "function boundaries from " + boundaries + "; no branch relocation, direct call, or string xref evidence recovered; " + stubs
 	}
-	detail += "; LC_UNIXTHREAD and module-initializer entrypoints, tail calls, general register/vtable/function-pointer indirect calls, and intra-function control-flow paths are not traversed"
+	detail += "; only exact x86_64 LC_UNIXTHREAD states are supported; module-initializer entrypoints, tail calls, general register/vtable/function-pointer indirect calls, and intra-function control-flow paths are not traversed"
 	graph.AddCoverage(behavior.Coverage{
 		NodeID:       content.NodeID,
 		AnalysisArea: "macho-function-scope/" + arch,
@@ -1370,7 +1378,9 @@ func extractFunctionScopedCalls(graph *behavior.Graph, content artifact.Content,
 	}
 	if file.Type == macho.TypeExec {
 		if _, ok := machoEntrypointVA(file); !ok {
-			addPartialCoverageOnce(graph, content.NodeID, "macho-entrypoint/"+arch, "no unique supported LC_MAIN entrypoint was available; function-scoped behavior was retained with UNKNOWN execution connectivity")
+			addPartialCoverageOnce(graph, content.NodeID, "macho-entrypoint/"+arch, "no unique supported LC_MAIN or x86_64 LC_UNIXTHREAD entrypoint was available; function-scoped behavior was retained with UNKNOWN execution connectivity")
+		} else {
+			retainMachOUnixThreadEntry(graph, content, file, arch)
 		}
 	}
 	callGraphTruncated, callGraphDecodeIncomplete := markReachableFunctionsWithRangesDetailedSeeded(file, text, data, functions, dataRanges, machoExecutionSeedForContent(content))
@@ -1572,7 +1582,7 @@ func functionRangesBoundedDetailed(file *macho.File, text *macho.Section, textIn
 		}
 		funcs = append(funcs, machoFunction{Name: fmt.Sprintf("sub_%x", start), Start: start, Metadata: "function-start"})
 	}
-	// LC_MAIN is itself a trustworthy function boundary. In stripped files it
+	// A supported process entry command is itself a function boundary. In stripped files it
 	// prevents the fallback whole-__text range from making every call look as
 	// though it came directly from the process entrypoint.
 	if entryVA, ok := machoEntrypointVA(file); ok && entryVA >= text.Addr && entryVA < text.Addr+text.Size {
@@ -1764,10 +1774,9 @@ func markReachableFunctionsWithRangesDetailed(file *macho.File, text *macho.Sect
 func markReachableFunctionsWithRangesDetailedSeeded(file *macho.File, text *macho.Section, data []byte, functions []machoFunction, dataRanges []machoCodeRange, seed machoExecutionSeed) (bool, bool) {
 	var queue []int
 	queued := make([]bool, len(functions))
-	// LC_MAIN (or the executable-only main/start symbol fallback) is a local
-	// traversal seed only when the artifact is an execution root or is itself a
-	// target reached from one. The load command remains a valid function
-	// boundary even when the artifact has no execution context.
+	// A supported entry command seeds local traversal. Artifact execution
+	// ownership remains independent: a local entry does not create a root or
+	// turn UNKNOWN/UNCONNECTED content into CONNECTED content.
 	markMachOExecutionSeed(file, functions, seed, &queue, queued)
 	var edges []localCallEdge
 	truncated := false
@@ -1805,12 +1814,19 @@ func machoEntrypointVA(file *macho.File) (uint64, bool) {
 	}
 	var entryOff uint64
 	found := false
+	var unixThread []byte
 	for _, load := range file.Loads {
 		rawer, ok := load.(interface{ Raw() []byte })
 		if !ok {
 			continue
 		}
 		raw := rawer.Raw()
+		if len(raw) >= 8 && file.ByteOrder.Uint32(raw[0:4]) == 5 { // LC_UNIXTHREAD
+			if unixThread != nil {
+				return 0, false
+			}
+			unixThread = raw
+		}
 		if len(raw) < 8 || file.ByteOrder.Uint32(raw[0:4]) != lcMain {
 			continue
 		}
@@ -1819,6 +1835,12 @@ func machoEntrypointVA(file *macho.File) (uint64, bool) {
 		}
 		entryOff = file.ByteOrder.Uint64(raw[8:16])
 		found = true
+	}
+	if unixThread != nil {
+		if found { // Conflicting process-entry mechanisms are not resolved by guessing.
+			return 0, false
+		}
+		return machoUnixThreadEntrypointVA(file, unixThread)
 	}
 	if !found {
 		return 0, false

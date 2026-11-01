@@ -115,14 +115,15 @@ func (budget *rawFeatureMatchBudget) matches(expression *regexp.Regexp, value st
 
 func addRawFeatureFeature(graph *behavior.Graph, content artifact.Content, representation, key, evidenceKind, value string, offset int, support behavior.Support) bool {
 	evidenceID := graph.AddEvidence(behavior.Evidence{
-		NodeID:   content.NodeID,
-		ScopeID:  content.ScopeID,
-		Logical:  content.LogicalPath,
-		Physical: content.PhysicalPath,
-		Offset:   int64(offset),
-		Method:   "raw-byte-strings",
-		Kind:     evidenceKind,
-		Value:    value,
+		NodeID:      content.NodeID,
+		ScopeID:     content.ScopeID,
+		Logical:     content.LogicalPath,
+		Physical:    content.PhysicalPath,
+		Offset:      int64(offset),
+		OffsetKnown: true,
+		Method:      "raw-byte-strings",
+		Kind:        evidenceKind,
+		Value:       value,
 	})
 	if evidenceID == "" {
 		graph.MarkWorkOmitted()
