@@ -882,6 +882,23 @@ func (state *javaScriptCommandState) resolveInvocation(method, call, scope strin
 		}
 		return embeddedInvocation{}, nil, false
 	}
+	// Options can change shell selection, argv handling and working directory.
+	// Until those properties are modeled, retain only the proven API call.
+	optionsIndex := 1
+	if method != "exec" && method != "execsync" && len(arguments) > 1 {
+		second := strings.TrimSpace(arguments[1])
+		if strings.HasPrefix(second, "[") || second == "undefined" {
+			optionsIndex = 2
+		}
+	}
+	if len(arguments) > optionsIndex {
+		options := strings.TrimSpace(arguments[optionsIndex])
+		if options != "{}" && options != "undefined" {
+			invocation, _, retained := unresolved("", nil)
+			invocation.qualifiers = map[string]string{"unresolved_process_options": "shell, working-directory and other launch options were not modeled"}
+			return invocation, nil, retained
+		}
+	}
 	switch method {
 	case "exec", "execsync":
 		return embeddedInvocation{shellCommand: executable}, proofs, true
