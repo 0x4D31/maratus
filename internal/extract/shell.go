@@ -995,12 +995,14 @@ func handleShellCommandString(graph *behavior.Graph, content artifact.Content, f
 		return
 	}
 	snippetEvidenceID := graph.AddEvidence(behavior.Evidence{
-		NodeID:  content.NodeID,
-		ScopeID: content.ScopeID,
-		Logical: content.LogicalPath,
-		Method:  "shell",
-		Kind:    "shell-command-string",
-		Value:   snippet,
+		NodeID:   content.NodeID,
+		ScopeID:  content.ScopeID,
+		Logical:  content.LogicalPath,
+		Physical: content.PhysicalPath,
+		Line:     lineNo,
+		Method:   "shell",
+		Kind:     "shell-command-string",
+		Value:    snippet,
 	})
 	analyzeShellLine(graph, content, snippet, lineNo, execution, snippetEvidenceID, expansionDepth+1, order)
 }
@@ -1071,34 +1073,69 @@ func nonFlagArgs(fields []string) []string {
 }
 
 func handleOSAScript(graph *behavior.Graph, content artifact.Content, fields []string, lineNo int, execution behavior.ExecutionContext) {
-	for _, snippet := range osascriptSnippets(fields) {
-		snippetEvidenceID := graph.AddEvidence(behavior.Evidence{
-			NodeID:  content.NodeID,
-			ScopeID: content.ScopeID,
-			Logical: content.LogicalPath,
-			Method:  "shell",
-			Kind:    "osascript-snippet",
-			Value:   snippet,
-		})
-		analyzeAppleScriptLine(graph, content, snippet, lineNo, execution, snippetEvidenceID)
+	language, code, ok := osaInlineProgram(fields)
+	if !ok {
+		return
 	}
+	snippetEvidenceID := graph.AddEvidence(behavior.Evidence{
+		NodeID:  content.NodeID,
+		ScopeID: content.ScopeID,
+		Logical: content.LogicalPath,
+		Method:  "shell",
+		Kind:    "osascript-snippet",
+		Value:   code,
+	})
+	content.SupportingEvidenceIDs = append(append([]string(nil), content.SupportingEvidenceIDs...), snippetEvidenceID)
+	AnalyzeInlineCode(graph, content, language, code, execution, snippetEvidenceID)
 }
 
-func osascriptSnippets(fields []string) []string {
+// -e arguments are successive lines of one program, not independent scripts.
+// After a positional program/argument, later -e text is data rather than code.
+func osaInlineProgram(fields []string) (string, string, bool) {
+	language := "applescript"
+	languageSet := false
 	var out []string
 	for i := 1; i < len(fields); i++ {
+		if i >= maxInterpreterArgumentTokens {
+			return "", "", false
+		}
 		field := fields[i]
 		switch {
 		case field == "-e" || field == "--execute":
-			if i+1 < len(fields) {
-				out = append(out, fields[i+1])
-				i++
+			if i+1 >= len(fields) {
+				return "", "", false
 			}
+			out = append(out, fields[i+1])
+			i++
 		case strings.HasPrefix(field, "-e") && len(field) > 2:
 			out = append(out, strings.TrimPrefix(field, "-e"))
+		case field == "-l" || strings.HasPrefix(field, "-l") && len(field) > 2:
+			name := strings.TrimPrefix(field, "-l")
+			if field == "-l" {
+				if i+1 >= len(fields) {
+					return "", "", false
+				}
+				i++
+				name = fields[i]
+			}
+			if languageSet {
+				return "", "", false
+			}
+			languageSet = true
+			switch strings.ToLower(name) {
+			case "javascript":
+				language = "jxa"
+			case "applescript":
+			default:
+				return "", "", false
+			}
+		case field == "--" || !strings.HasPrefix(field, "-"):
+			return language, strings.Join(out, "\n"), len(out) > 0
+		default:
+			return "", "", false
 		}
 	}
-	return out
+	return language, strings.Join(out, "\n"), len(out) > 0
 }
 
 func handleLaunchdPathWrite(graph *behavior.Graph, content artifact.Content, tool string, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {

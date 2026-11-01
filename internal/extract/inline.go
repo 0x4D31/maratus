@@ -40,6 +40,11 @@ func AnalyzeInlineCode(graph *behavior.Graph, content artifact.Content, language
 	content.SemanticLanguage = language
 	content.LogicalPath = inlineLogicalPath(content.LogicalPath, language, "inline")
 	content.Data = []byte(code)
+	if language == "applescript" || language == "jxa" {
+		content = contentWithExecutionContext(content, execution)
+		ExtractText(graph, content)
+		return
+	}
 	ExtractText(graph, content)
 	if language == "python" {
 		analyzePythonBase64Exec(graph, content, originalCode, execution, evidenceID, 0)
@@ -48,7 +53,7 @@ func AnalyzeInlineCode(graph *behavior.Graph, content artifact.Content, language
 }
 
 func normalizeInlineCode(language, code string) string {
-	if language != "python" && language != "javascript" && language != "jxa" {
+	if language != "python" && language != "javascript" {
 		return code
 	}
 	if language == "python" {

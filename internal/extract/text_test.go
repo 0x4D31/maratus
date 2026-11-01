@@ -2603,11 +2603,11 @@ func TestExtractTextRetainsAssignedStaticURLsWithoutInventingNetworkOperation(t 
 	}
 }
 
-func TestExtractTextClassifiesConstructedAppleScriptMultipartFileUpload(t *testing.T) {
+func TestExtractTextLeavesConstructedAppleScriptMultipartArgumentsUnknown(t *testing.T) {
 	var graph behavior.Graph
 	content := artifact.Content{
 		NodeID:      "node-0001",
-		LogicalPath: "stealer.jxa",
+		LogicalPath: "upload.applescript",
 		Kind:        "script",
 		MediaType:   "text/plain",
 		Role:        "runtime",
@@ -2618,23 +2618,22 @@ func TestExtractTextClassifiesConstructedAppleScriptMultipartFileUpload(t *testi
 
 	ExtractText(&graph, content)
 
-	for _, operation := range graph.Operations {
-		if operation.Kind == "network.upload" && operation.RequiredResource().Value == "https://upload.example/collect" {
-			source, ok := testOperationBinding(operation, behavior.ResourceRoleLocalInput)
-			if !ok || source.Value != "$dynamic_file" {
-				t.Fatalf("constructed upload should retain an explicitly symbolic source: %#v", operation)
-			}
-			return
-		}
+	if len(graph.Operations) != 1 || graph.Operations[0].Kind != behavior.OperationInterpreterInvoke {
+		t.Fatalf("unresolved expression must retain only the shell invocation: %#v", graph.Operations)
 	}
-	t.Fatalf("constructed AppleScript multipart upload was not modeled: %#v", graph.Operations)
+	if arguments, ok := testOperationBinding(graph.Operations[0], behavior.ResourceRoleArguments); !ok || arguments.Value != "" {
+		t.Fatalf("literal fragments must not become a complete command: %#v", graph.Operations)
+	}
+	if len(graph.Network) != 0 {
+		t.Fatalf("unresolved expression invented a network implementation: %#v", graph.Network)
+	}
 }
 
 func TestExtractTextDoesNotTreatConstructedCurlFormStringAsFileUpload(t *testing.T) {
 	var graph behavior.Graph
 	ExtractText(&graph, artifact.Content{
 		NodeID:      "node-0001",
-		LogicalPath: "dialog.jxa",
+		LogicalPath: "dialog.applescript",
 		Kind:        "script",
 		MediaType:   "text/plain",
 		Role:        "runtime",
