@@ -659,10 +659,17 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 					commandContent.SupportingEvidenceIDs = append(commandContent.SupportingEvidenceIDs, bindingEvidenceID)
 				}
 				start := graph.CaptureGraphRange()
-				if language == "python" && invocation.processAttempt {
+				if invocation.processAttempt {
+					apiPrefix := "subprocess."
+					apiIdentity := "stable-python-import-and-exact-qualified-call"
+					if language == "javascript" {
+						apiPrefix = "child_process."
+						apiIdentity = "stable-javascript-binding-and-exact-call"
+						addPartialCoverageOnce(graph, content.NodeID, "javascript-process-command-analysis", "a proven child_process call retained a process operation with unresolved arguments; command behavior and downstream effects were not inferred")
+					}
 					qualifiers := map[string]string{
-						"api":                  "subprocess." + invocation.api,
-						"api_identity":         "stable-python-import-and-exact-qualified-call",
+						"api":                  apiPrefix + invocation.api,
+						"api_identity":         apiIdentity,
 						"argument_coverage":    "unresolved",
 						"unresolved_arguments": "dynamic or unsupported argv",
 					}

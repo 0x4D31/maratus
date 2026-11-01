@@ -865,8 +865,21 @@ func (state *javaScriptCommandState) resolveInvocation(method, call, scope strin
 	if len(arguments) == 0 {
 		return embeddedInvocation{}, nil, false
 	}
+	unresolved := func(executable string, proofs []javaScriptCommandProof) (embeddedInvocation, []javaScriptCommandProof, bool) {
+		if state.limited {
+			return embeddedInvocation{}, nil, false
+		}
+		api := map[string]string{"exec": "exec", "execsync": "execSync", "spawn": "spawn", "spawnsync": "spawnSync", "execfile": "execFile", "execfilesync": "execFileSync"}[method]
+		if api == "" {
+			return embeddedInvocation{}, nil, false
+		}
+		return embeddedInvocation{processAttempt: true, executableOnly: executable, argumentsUnresolved: true, api: api}, proofs, true
+	}
 	executable, proofs, ok := state.resolveExpression(arguments[0], scope, 0)
 	if !ok || executable == "" {
+		if javaScriptPartialArgumentIdentifier(strings.TrimSpace(arguments[0])) {
+			return unresolved("", nil)
+		}
 		return embeddedInvocation{}, nil, false
 	}
 	switch method {
@@ -880,6 +893,9 @@ func (state *javaScriptCommandState) resolveInvocation(method, call, scope strin
 			case strings.HasPrefix(second, "["):
 				values, argumentProofs, resolved := state.resolveArray(second, scope)
 				if !resolved {
+					if javaScriptPartialArgv(second) {
+						return unresolved(executable, proofs)
+					}
 					return embeddedInvocation{}, nil, false
 				}
 				argv = append(argv, values...)
@@ -887,6 +903,9 @@ func (state *javaScriptCommandState) resolveInvocation(method, call, scope strin
 			case second == "undefined" || strings.HasPrefix(second, "{"):
 				// An omitted argv or an options object does not add arguments.
 			default:
+				if javaScriptPartialArgumentIdentifier(second) {
+					return unresolved(executable, proofs)
+				}
 				return embeddedInvocation{}, nil, false
 			}
 		}
@@ -894,6 +913,28 @@ func (state *javaScriptCommandState) resolveInvocation(method, call, scope strin
 	default:
 		return embeddedInvocation{}, nil, false
 	}
+}
+
+func javaScriptPartialArgumentIdentifier(value string) bool {
+	return javaScriptIdentifier(value) && !javaScriptSyntaxKeyword(value) && value != "undefined"
+}
+
+// Admit only closed literal/identifier arrays for partial argv. An unsupported
+// expression must not turn malformed source into a process claim.
+func javaScriptPartialArgv(expression string) bool {
+	if len(expression) < 2 || expression[0] != '[' || expression[len(expression)-1] != ']' {
+		return false
+	}
+	parts, exact := splitJavaScriptArgumentsExact(expression[1:len(expression)-1], maxJavaScriptCommandValueBytes, maxJavaScriptCommandArrayArguments)
+	if !exact {
+		return false
+	}
+	for _, part := range parts {
+		if _, literal := exactJavaScriptQuotedLiteral(strings.TrimSpace(part)); !literal && !javaScriptPartialArgumentIdentifier(strings.TrimSpace(part)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (state *javaScriptCommandState) resolveArray(expression, scope string) ([]string, []javaScriptCommandProof, bool) {

@@ -185,6 +185,14 @@ operations. Exact bundled module wrappers remain useful `UNKNOWN` observations
 even when an alias occurs inside unsupported control flow; that case is
 reported as partial and never promoted to an operation.
 
+An exact call through a proven `child_process` binding may retain a neutral
+`process.execute` operation when its command or argv cannot be resolved. The
+operation records the API and unresolved-argument coverage. Partial arguments
+are limited to identifiers and closed literal/identifier argv arrays. A separately proven
+executable argument can be retained without inventing argv. Binding ambiguity,
+malformed call syntax and exhausted proof budgets still prevent promotion;
+unresolved commands do not produce shell behavior or downstream resource flow.
+
 A separate closed Node builtin adapter resolves immutable ESM and CommonJS
 bindings for selected `fs`, `fs/promises`, `os`, `dns`, and `dns/promises`
 APIs. It applies the same typed file, discovery, user, and name-resolution
