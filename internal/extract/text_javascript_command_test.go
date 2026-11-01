@@ -386,9 +386,7 @@ cp.exec(command);
 }`
 	var graph behavior.Graph
 	ExtractText(&graph, javascriptCommandTestContent(source))
-	if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
-		t.Fatalf("nested write retained a stale command: operations=%#v relations=%#v", graph.Operations, graph.Relations)
-	}
+	assertUnresolvedJavaScriptProcess(t, graph, "")
 }
 
 func TestExtractTextResolvesDirectAndEsbuildJavaScriptProcessCalls(t *testing.T) {
@@ -555,7 +553,9 @@ cp.exec(command);
 		t.Run(test.name, func(t *testing.T) {
 			var graph behavior.Graph
 			ExtractText(&graph, javascriptCommandTestContent(test.body))
-			if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
+			if test.name == "unproved es module interop" || test.name == "reassigned es module interop" {
+				assertUnresolvedJavaScriptProcess(t, graph, "")
+			} else if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
 				t.Fatalf("shadowed runtime loader produced semantics: operations=%#v relations=%#v", graph.Operations, graph.Relations)
 			}
 			if !hasPartialCoverageArea(graph.Coverage, "javascript-process-binding-analysis") &&
@@ -813,8 +813,16 @@ cp.exec(command);
 		t.Run(test.name, func(t *testing.T) {
 			var graph behavior.Graph
 			ExtractText(&graph, javascriptCommandTestContent(test.body))
-			if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
-				t.Fatalf("dynamic command produced semantics: operations=%#v relations=%#v", graph.Operations, graph.Relations)
+			if test.name == "unclosed template" || test.name == "stale scalar after direct eval" || test.name == "unknown template identifier" || test.name == "template call" || test.name == "concatenation" {
+				if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
+					t.Fatalf("unproved call acquired semantics: %#v", graph.Operations)
+				}
+			} else {
+				executable := ""
+				if test.name == "dynamic argv member" {
+					executable = "/bin/sh"
+				}
+				assertUnresolvedJavaScriptProcess(t, graph, executable)
 			}
 			hasExpectedCoverage := hasPartialCoverageArea(graph.Coverage, "javascript-process-command-analysis")
 			hasExpectedCoverage = hasExpectedCoverage ||
@@ -938,7 +946,7 @@ func TestExtractTextRejectsUnsupportedJavaScriptStringEscapes(t *testing.T) {
 	var graph behavior.Graph
 	ExtractText(&graph, javascriptCommandTestContent(source))
 	if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
-		t.Fatalf("unsupported JavaScript escape produced semantics: operations=%#v relations=%#v", graph.Operations, graph.Relations)
+		t.Fatalf("unsupported literal acquired semantics: %#v", graph.Operations)
 	}
 	if !hasPartialCoverageArea(graph.Coverage, "javascript-process-command-analysis") {
 		t.Fatalf("unsupported JavaScript escape was not disclosed: %#v", graph.Coverage)
