@@ -1,0 +1,174 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Pin release builds so rerunning a tag cannot silently change the
+          # compiler or standard-library patch level embedded in the assets.
+          go-version: 1.27.3
+          cache: true
+
+      - name: Verify tag
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # This module has no /v2 path, so Go semantic import versioning only
+          # permits v0 and v1 release tags.
+          version_pattern='^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+          if [[ "$VERSION" =~ $version_pattern ]]; then
+            prerelease=${BASH_REMATCH[5]:-}
+          else
+            echo "release tag must be a canonical v0 or v1 module version, for example v0.1.0" >&2
+            exit 1
+          fi
+          if [[ -n "$prerelease" ]]; then
+            IFS='.' read -ra identifiers <<< "$prerelease"
+            for identifier in "${identifiers[@]}"; do
+              if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" == 0* && "$identifier" != "0" ]]; then
+                echo "numeric pre-release identifiers must not contain leading zeroes" >&2
+                exit 1
+              fi
+            done
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "release tag must point to a commit on main" >&2
+            exit 1
+          fi
+          go mod verify
+          go test ./...
+          go vet ./...
+
+      - name: Require successful CI for tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          max_attempts=30
+          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            if ! runs="$(
+              gh api --method GET \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+                -f branch=main \
+                -f event=push \
+                -f head_sha="$GITHUB_SHA" \
+                -f per_page=100 \
+                --jq '.workflow_runs[] | [.head_sha, .event, .head_branch, .status, (.conclusion // "pending"), .html_url] | @tsv'
+            )"; then
+              echo "unable to query ci.yml workflow runs; refusing to publish" >&2
+              exit 1
+            fi
+
+            found=false
+            waiting=false
+            completed=()
+            while IFS=$'\t' read -r head_sha event head_branch status conclusion url; do
+              [[ -z "$head_sha" ]] && continue
+              if [[ "$head_sha" != "$GITHUB_SHA" || "$event" != "push" || "$head_branch" != "main" ]]; then
+                continue
+              fi
+              found=true
+              if [[ "$status" == "completed" && "$conclusion" == "success" ]]; then
+                echo "verified successful ci.yml run for $GITHUB_SHA: $url"
+                exit 0
+              fi
+              if [[ "$status" != "completed" ]]; then
+                waiting=true
+              else
+                completed+=("$conclusion: $url")
+              fi
+            done <<< "$runs"
+
+            if [[ "$found" == true && "$waiting" == false ]]; then
+              echo "ci.yml completed without success for tagged commit $GITHUB_SHA; refusing to publish" >&2
+              printf '  %s\n' "${completed[@]}" >&2
+              exit 1
+            fi
+            if ((attempt < max_attempts)); then
+              echo "waiting for a successful ci.yml push run on main for $GITHUB_SHA (attempt $attempt/$max_attempts)"
+              sleep 20
+            fi
+          done
+          echo "no successful completed ci.yml push run on main was found for tagged commit $GITHUB_SHA; refusing to publish" >&2
+          echo "wait for CI to succeed for this exact commit, then rerun the release workflow" >&2
+          exit 1
+
+      - name: Build archives
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 022
+          mkdir -p dist
+          source_date_epoch=$(git show -s --format=%ct "$COMMIT")
+          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            name="maratus_${VERSION}_${goos}_${goarch}"
+            mkdir -p "dist/$name"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath -buildvcs=false \
+              -ldflags="-s -w -X github.com/0x4D31/maratus/internal/buildinfo.Version=$VERSION -X github.com/0x4D31/maratus/internal/buildinfo.Commit=$COMMIT" \
+              -o "dist/$name/maratus" ./cmd/maratus
+            install -m 0644 README.md "dist/$name/README.md"
+            install -m 0644 SECURITY.md "dist/$name/SECURITY.md"
+            install -m 0644 THIRD_PARTY_NOTICES "dist/$name/THIRD_PARTY_NOTICES"
+            mkdir -p "dist/$name/docs"
+            # Ship every public Markdown document referenced by README. Using
+            # the complete checked-in set also prevents a future document from
+            # being silently omitted from otherwise valid release archives.
+            install -m 0644 docs/*.md "dist/$name/docs/"
+            install -m 0644 CONTRIBUTING.md "dist/$name/CONTRIBUTING.md"
+            install -m 0644 LICENSE "dist/$name/LICENSE"
+            if [[ -f NOTICE ]]; then
+              install -m 0644 NOTICE "dist/$name/NOTICE"
+            fi
+            tar --sort=name \
+              --mtime="@$source_date_epoch" \
+              --owner=0 --group=0 --numeric-owner \
+              -C dist -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+          done
+          "dist/maratus_${VERSION}_linux_amd64/maratus" version | grep -F "$VERSION"
+          "dist/maratus_${VERSION}_linux_amd64/maratus" version | grep -F "${COMMIT:0:12}"
+          cd dist
+          sha256sum ./*.tar.gz > checksums.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$VERSION" dist/*.tar.gz dist/checksums.txt \
+            --verify-tag --generate-notes "${prerelease[@]}"
