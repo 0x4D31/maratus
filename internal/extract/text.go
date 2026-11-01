@@ -133,6 +133,17 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 	input := boundedText(content.Data)
 	addBoundedTextCoverage(graph, content, "text-analysis", input)
 	lines := input.Lines
+	if (language == "applescript" || language == "jxa") && input.truncated() {
+		addPartialCoverageOnce(graph, content.NodeID, "osa-source-completeness", "truncated source cannot establish complete statement contexts or stable host receivers; OSA source semantics were not inferred")
+		return
+	}
+	if language == "applescript" {
+		lines = maskAppleScriptComments(lines)
+		extractAppleScriptSource(graph, content, lines)
+	}
+	if language == "jxa" {
+		extractJXAShellCalls(graph, content, input.Source)
+	}
 	if language == "python" {
 		for _, line := range lines {
 			trimmed := strings.TrimSpace(line)
@@ -521,7 +532,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		if assigned && scriptSemanticLanguage(language) && staticURLAssignmentName(assignedName) {
 			assignedURLs = staticAssignedURLsBudget(semanticLine, lineBudget)
 		}
-		if !assigned && language != "shell" {
+		if !assigned && language != "shell" && language != "applescript" && language != "jxa" {
 			analysisLine = expandSimpleVars(language, semanticLine, vars)
 		}
 		if variableState.limited {
@@ -616,8 +627,6 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		case "shell":
 			analyzeShellLineVariables(graph, lineContent, analysisLine, lineNo, executionContextForContent(lineContent), evidenceID, 0,
 				&shellSourceOrder{group: graph.NewSourceOrderGroup(), uncertain: shellConditionalAssignment}, variableState, scopeKey)
-		case "applescript", "jxa":
-			extractAppleScriptBudget(graph, lineContent, analysisLine, lineNo, evidenceID, lineBudget)
 		case "python", "javascript":
 			if networkCall {
 				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget)
@@ -2982,24 +2991,16 @@ func downloadPath(value string) bool {
 	return strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/")
 }
 
-func extractAppleScriptBudget(graph *behavior.Graph, content artifact.Content, line string, lineNo int, evidenceID string, budget *textLineBudget) {
-	analyzeAppleScriptLineBudget(graph, content, line, lineNo, executionContextForContent(content), evidenceID, budget)
-}
-
-func analyzeAppleScriptLine(graph *behavior.Graph, content artifact.Content, line string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
-	state := newTextDerivedBudget()
-	analyzeAppleScriptLineBudget(graph, content, line, lineNo, execution, evidenceID, state.line())
-	addTextDerivedCoverageOnce(graph, content, state)
-}
-
 func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Content, line string, lineNo int, execution behavior.ExecutionContext, evidenceID string, budget *textLineBudget) {
-	lower := strings.ToLower(line)
-	if strings.Contains(lower, "open location") {
-		if dest := delegatedURLDestinationsBudget(line, budget); len(dest) > 0 {
-			addDelegatedNetworkOperation(graph, content, "AppleScript open location", dest, lineNo, execution, evidenceID)
+	line = appleScriptCommandStatement(line)
+	if argument, ok := appleScriptCommandArgument(line, "open location"); ok {
+		if value, exact := exactAppleScriptStringExpression(argument); exact {
+			if dest := delegatedURLDestinationsBudget(value, budget); len(dest) > 0 {
+				addDelegatedNetworkOperation(graph, content, "AppleScript open location", dest, lineNo, execution, evidenceID)
+			}
 		}
 	}
-	if strings.Contains(lower, "display dialog") && strings.Contains(lower, "hidden answer") {
+	if appleScriptHiddenAnswerDialog(line) {
 		graph.AddOperation(behavior.ModeledOperation{
 			SubjectNodeID:    content.NodeID,
 			ScopeID:          content.ScopeID,
@@ -3011,75 +3012,36 @@ func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Conten
 			Line:             lineNo,
 		})
 	}
-	if isAppleScriptShellExecution(lower) {
-		command := firstQuotedBudget(line, budget)
-		if synthetic := syntheticShellCommandBudget(line, budget); betterSyntheticCommandBudget(command, synthetic, budget) {
-			command = synthetic
+	if argument, ok := appleScriptCommandArgument(line, "do shell script"); ok {
+		command, exact := exactAppleScriptStringExpression(argument)
+		if !exact {
+			command = ""
+			addPartialCoverageOnce(graph, content.NodeID, "osa-command-arguments", "a shell invocation had an unresolved complete argument expression; no command was synthesized from literal fragments")
+			if !boundedAppleScriptArgumentShape(argument) {
+				return
+			}
 		}
-		graph.AddOperation(behavior.ModeledOperation{
-			SubjectNodeID: content.NodeID,
-			ScopeID:       content.ScopeID,
-			Kind:          behavior.OperationInterpreterInvoke,
-			ResourceBindings: behavior.Bindings(
-				behavior.Bind(behavior.ResourceRoleArguments, behavior.NewResource(behavior.ResourceCommand, command)),
-				behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, "/bin/sh", behavior.ResourceClassInterpreter)),
-			),
-			EvidenceIDs: []string{evidenceID},
-			Support:     behavior.SupportCorroborated,
-			Execution:   execution,
-			Line:        lineNo,
-		})
-		if command != "" {
-			AnalyzeShellLine(graph, content, command, lineNo, execution, evidenceID)
-		}
+		addOSAShellInvocation(graph, content, command, lineNo, execution, evidenceID)
 	}
 }
 
-func isAppleScriptShellExecution(lower string) bool {
-	return strings.Contains(lower, "do shell script") ||
-		strings.Contains(lower, "doshellscript(") ||
-		strings.Contains(lower, ".doshellscript(")
-}
-
-func betterSyntheticCommandBudget(current, synthetic string, budget *textLineBudget) bool {
-	if synthetic == "" {
-		return false
+func addOSAShellInvocation(graph *behavior.Graph, content artifact.Content, command string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
+	graph.AddOperation(behavior.ModeledOperation{
+		SubjectNodeID: content.NodeID,
+		ScopeID:       content.ScopeID,
+		Kind:          behavior.OperationInterpreterInvoke,
+		ResourceBindings: behavior.Bindings(
+			behavior.Bind(behavior.ResourceRoleArguments, behavior.NewResource(behavior.ResourceCommand, command)),
+			behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, "/bin/sh", behavior.ResourceClassInterpreter)),
+		),
+		EvidenceIDs: mergeEvidenceIDs(append([]string{evidenceID}, content.SupportingEvidenceIDs...)...),
+		Support:     behavior.SupportCorroborated,
+		Execution:   execution,
+		Line:        lineNo,
+	})
+	if command != "" {
+		AnalyzeShellLine(graph, content, command, lineNo, execution, evidenceID)
 	}
-	if strings.TrimSpace(current) == "" {
-		return true
-	}
-	return len(destinationsBudget(current, budget)) == 0 && len(destinationsBudget(synthetic, budget)) > 0
-}
-
-func syntheticShellCommandBudget(line string, budget *textLineBudget) string {
-	lower := strings.ToLower(line)
-	dest := destinationsBudget(line, budget)
-	switch {
-	case strings.Contains(lower, "curl") && len(dest) > 0:
-		if appleScriptMultipartFileUpload(lower) {
-			return "curl -F file=@$dynamic_file " + dest[0]
-		}
-		return "curl " + dest[0]
-	case strings.Contains(lower, "wget") && len(dest) > 0:
-		return "wget " + dest[0]
-	case strings.Contains(lower, "dscl") && strings.Contains(lower, "authonly"):
-		return "dscl . authonly"
-	default:
-		return ""
-	}
-}
-
-func appleScriptMultipartFileUpload(lower string) bool {
-	if !strings.Contains(lower, "file=@") {
-		return false
-	}
-	return strings.Contains(lower, " -f ") ||
-		strings.Contains(lower, ` -f '`) ||
-		strings.Contains(lower, ` -f "`) ||
-		strings.Contains(lower, " --form ") ||
-		strings.Contains(lower, ` --form '`) ||
-		strings.Contains(lower, ` --form "`) ||
-		strings.Contains(lower, " --form=")
 }
 
 func extractNativeAPIsBudget(graph *behavior.Graph, content artifact.Content, language, line string, lineNo int, evidenceID string, budget *textLineBudget) {
