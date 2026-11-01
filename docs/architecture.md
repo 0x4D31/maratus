@@ -185,6 +185,33 @@ retained-token payload allowance; this is not a limit on total process memory.
 Opaque-use inventory streams occurrences and deduplicates by scope and name,
 preserving later writes while bounding the number of retained distinct uses.
 
+Source with unsupported structural syntax or multiple lexical scopes on one
+physical line instead uses a pinned Sobek parser frontend. The two frontends
+are selected by syntax before operation extraction and never emit duplicate
+operations for one source. Only the parser, AST and source-location packages
+are linked; no interpreter is instantiated. Source maps and module loading are
+disabled. UTF-8, byte, token, lexical nesting, AST traversal, node, binding and
+recognized-call bounds apply. Parser errors discard the semantic inventory;
+missing or inconsistent node positions cannot become evidence locations.
+Programs containing static ESM imports or an already proven OS interop helper
+retain the established import, interop and static-value frontend until their
+complete proof chains are supported by the AST adapter.
+
+This frontend initially recognizes direct calls through stable CommonJS
+namespace bindings using the shared Node builtin API table, plus literal
+unshadowed `fetch` calls and `child_process` primitives. Name lookup accounts
+for blocks, functions, parameters, hoisted declarations, catch bindings and
+class static blocks. Namespace replacement, destructuring writes, shared
+module mutation, escapes and dynamic code invalidate affected proofs. It does
+not resolve named imports, destructured module aliases, general helper argument
+flow or a complete call graph. Paths without literal proof remain empty typed
+resources. Nonempty launch options prevent command expansion. Nested scopes do
+not inherit an artifact's execution root without a proven invocation; sibling
+lexical blocks retain distinct operation scopes. These are partial static
+models, not evidence of execution or successful effects.
+Unbraced branches, conditional and short-circuit expression arms, loop bodies,
+and switch cases also keep separate correlation contexts.
+
 An exact zero-argument whole-program IIFE may be treated as the module wrapper.
 A closed numeric bundle adapter can then connect exact CommonJS wrappers,
 loader dispatch, aliases, and supported calls through ordinary Features and
