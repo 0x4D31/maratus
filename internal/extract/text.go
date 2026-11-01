@@ -215,6 +215,10 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 	javascriptFetchSafe := false
 	if language == "javascript" {
 		javascriptProcessBindings = newJavaScriptProcessBindings(lines)
+		if requiresJavaScriptASTFrontend(javascriptProcessBindings.prescan) {
+			extractJavaScriptASTSource(graph, content, input.Source)
+			return
+		}
 		javascriptFetchSafe = javaScriptBuiltinFetchIdentitySafe(javascriptProcessBindings.prescan)
 	}
 	pythonSubprocessBindings := map[string]bool{}
