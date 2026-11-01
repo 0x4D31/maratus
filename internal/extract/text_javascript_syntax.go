@@ -1,6 +1,10 @@
 package extract
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 const maxJavaScriptSyntaxNesting = 128
 
@@ -131,36 +135,63 @@ func scanJavaScriptIdentifierOccurrencesMode(
 	if maxBytes < 0 || maxOccurrences < 0 || len(text) > maxBytes {
 		return nil, false
 	}
+	var occurrences []javaScriptIdentifierOccurrence
+	ok := visitJavaScriptIdentifierOccurrences(text, maxBytes, includeTemplateExpressions, func(occurrence javaScriptIdentifierOccurrence) bool {
+		if len(occurrences) >= maxOccurrences {
+			return false
+		}
+		occurrences = append(occurrences, occurrence)
+		return true
+	})
+	if !ok {
+		return nil, false
+	}
+	return occurrences, true
+}
+
+// Emit an occurrence only after the following token has resolved property-key
+// and update/assignment context. At most one pending occurrence is retained.
+func visitJavaScriptIdentifierOccurrences(text string, maxBytes int, includeTemplateExpressions bool, visit func(javaScriptIdentifierOccurrence) bool) bool {
+	if maxBytes < 0 || len(text) > maxBytes {
+		return false
+	}
 	var (
-		occurrences      []javaScriptIdentifierOccurrence
-		lastOccurrence   = -1
+		pending          javaScriptIdentifierOccurrence
+		hasPending       bool
 		lastBare         bool
-		prefixCandidate  = -1
+		prefixCandidate  bool
 		prefixUpdateNext bool
 		previousToken    string
 		valid            = true
 	)
+	flush := func() bool {
+		if !hasPending {
+			return true
+		}
+		hasPending = false
+		return visit(pending)
+	}
 	finalizePrefix := func(next string) {
-		if prefixCandidate < 0 {
+		if !prefixCandidate || !hasPending {
 			return
 		}
 		switch next {
 		case ".", "?.", "[", "(":
 		default:
-			occurrences[prefixCandidate].Write = true
+			pending.Write = true
 		}
-		prefixCandidate = -1
+		prefixCandidate = false
 	}
 	finalizeReference := func(next string) {
-		if lastOccurrence < 0 || !occurrences[lastOccurrence].Reference || next != ":" {
+		if !hasPending || !pending.Reference || next != ":" {
 			return
 		}
-		switch occurrences[lastOccurrence].previousToken {
+		switch pending.previousToken {
 		case "", "{", ",":
 			// An object property key or statement label is not a
 			// reference to a same-named lexical binding. Ternary and
 			// switch expressions retain their preceding context.
-			occurrences[lastOccurrence].Reference = false
+			pending.Reference = false
 		}
 	}
 	_, ok := scanJavaScriptSyntaxMode(text, 0, len(text), 0, includeTemplateExpressions, func(event javaScriptSyntaxEvent) bool {
@@ -169,28 +200,27 @@ func scanJavaScriptIdentifierOccurrencesMode(
 		finalizeReference(token)
 
 		if event.kind == javaScriptSyntaxIdentifier {
+			if !flush() {
+				valid = false
+				return false
+			}
 			if javaScriptSyntaxKeyword(token) {
-				lastOccurrence = -1
 				lastBare = false
 				prefixUpdateNext = false
 				previousToken = token
 				return true
 			}
-			if len(occurrences) >= maxOccurrences {
-				valid = false
-				return false
-			}
 			bare := previousToken != "." && previousToken != "?."
-			occurrences = append(occurrences, javaScriptIdentifierOccurrence{
+			pending = javaScriptIdentifierOccurrence{
 				Name:          token,
 				Offset:        event.start,
 				Reference:     bare,
 				previousToken: previousToken,
-			})
-			lastOccurrence = len(occurrences) - 1
+			}
+			hasPending = true
 			lastBare = bare
 			if prefixUpdateNext && bare {
-				prefixCandidate = lastOccurrence
+				prefixCandidate = true
 			}
 			prefixUpdateNext = false
 			previousToken = token
@@ -199,28 +229,31 @@ func scanJavaScriptIdentifierOccurrencesMode(
 
 		switch {
 		case javaScriptSyntaxAssignmentToken(token):
-			if lastOccurrence >= 0 && lastBare {
-				occurrences[lastOccurrence].Write = true
+			if hasPending && lastBare {
+				pending.Write = true
 			}
 		case token == "++" || token == "--":
-			if lastOccurrence >= 0 && lastBare {
-				occurrences[lastOccurrence].Write = true
+			if hasPending && lastBare {
+				pending.Write = true
 			} else {
 				prefixUpdateNext = true
 			}
 		default:
 			prefixUpdateNext = false
 		}
-		lastOccurrence = -1
+		if !flush() {
+			valid = false
+			return false
+		}
 		lastBare = false
 		previousToken = token
 		return true
 	})
 	if !ok || !valid {
-		return nil, false
+		return false
 	}
 	finalizePrefix("")
-	return occurrences, true
+	return flush()
 }
 
 // scanJavaScriptSyntax validates one bounded lexical fragment. With rootOpen
@@ -311,7 +344,7 @@ func scanJavaScriptSyntaxMode(
 			index++
 			continue
 		}
-		if char >= 0x80 {
+		if char >= 0x80 && !javaScriptUnicodeIdentifierStart(source[index:limit]) {
 			return 0, false
 		}
 		depth := len(delimiters)
@@ -358,11 +391,8 @@ func scanJavaScriptSyntaxMode(
 			index = end
 			continue
 		}
-		if javaScriptIdentifierStartByte(char) {
-			end := index + 1
-			for end < limit && javaScriptIdentifierByte(source[end]) {
-				end++
-			}
+		if javaScriptIdentifierStartByte(char) || javaScriptUnicodeIdentifierStart(source[index:limit]) {
+			end := javaScriptIdentifierEnd(source, index, limit)
 			if !emit(javaScriptSyntaxIdentifier, index, end, depth) {
 				return 0, false
 			}
@@ -446,6 +476,38 @@ func scanJavaScriptSyntaxMode(
 		return 0, false
 	}
 	return limit, true
+}
+
+// Support ordinary Unicode identifier letters without folding or normalizing
+// names. Escaped identifiers and unsupported code points remain fail-closed.
+func javaScriptUnicodeIdentifierStart(source string) bool {
+	if len(source) == 0 || source[0] < utf8.RuneSelf {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(source)
+	return size > 1 && !unicode.Is(unicode.Pattern_Syntax, r) &&
+		!unicode.Is(unicode.Pattern_White_Space, r) && (unicode.IsLetter(r) || unicode.Is(unicode.Nl, r))
+}
+
+func javaScriptIdentifierEnd(source string, start, limit int) int {
+	_, size := utf8.DecodeRuneInString(source[start:limit])
+	end := start + size
+	for end < limit {
+		if source[end] < utf8.RuneSelf {
+			if !javaScriptIdentifierByte(source[end]) {
+				break
+			}
+			end++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(source[end:limit])
+		if size == 1 || unicode.Is(unicode.Pattern_Syntax, r) || unicode.Is(unicode.Pattern_White_Space, r) ||
+			!(javaScriptUnicodeIdentifierStart(source[end:limit]) || unicode.In(r, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc) || r == '\u200c' || r == '\u200d') {
+			break
+		}
+		end += size
+	}
+	return end
 }
 
 func skipJavaScriptQuotedSyntax(source string, start, limit int, quote byte) (int, bool) {
