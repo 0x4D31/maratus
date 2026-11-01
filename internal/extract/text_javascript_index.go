@@ -10,8 +10,10 @@ const (
 	maxJavaScriptStructuralBytes      = 8 << 20
 	maxJavaScriptStructuralStatements = 64 << 10
 	maxJavaScriptStructuralDepth      = 128
-	maxJavaScriptStructuralTokens     = 1 << 20
-	maxJavaScriptStructuralUses       = 256 << 10
+	// Compact tokens retain more syntax within the former 64 MiB token payload
+	// allowance. This fixed count is identical across architectures.
+	maxJavaScriptStructuralTokens = (64 << 20) / 48
+	maxJavaScriptStructuralUses   = 256 << 10
 )
 
 type javaScriptStructuralDisposition string
@@ -121,12 +123,12 @@ const (
 )
 
 type javaScriptStructuralToken struct {
-	kind      javaScriptStructuralTokenKind
 	text      string
 	start     int
 	end       int
-	line      int
 	depth     int
+	line      uint32
+	kind      javaScriptStructuralTokenKind
 	multiline bool
 }
 
@@ -285,7 +287,7 @@ func buildJavaScriptStructuralIndexWithLimits(
 
 func validateJavaScriptStructuralLimits(limits javaScriptStructuralLimits) string {
 	switch {
-	case limits.bytes < 0:
+	case limits.bytes < 0 || limits.bytes > maxJavaScriptStructuralBytes:
 		return "JavaScript structural index byte limit was invalid"
 	case limits.statements < 0:
 		return "JavaScript structural index statement limit was invalid"
@@ -306,7 +308,7 @@ func (builder *javaScriptStructuralBuilder) token(event javaScriptSyntaxEvent) j
 		text:  text,
 		start: event.start,
 		end:   event.end,
-		line:  builder.lineAt(event.start),
+		line:  uint32(builder.lineAt(event.start)),
 		depth: event.depth,
 	}
 	switch {
@@ -328,10 +330,8 @@ func (builder *javaScriptStructuralBuilder) token(event javaScriptSyntaxEvent) j
 
 // scanJavaScriptSyntax intentionally reports only the opening backtick because
 // template internals are not identifiers available to matching. Recover the
-// complete token in a bounded local walk. Nested templates are balanced
-// recursively; slash syntax in interpolation remains unsupported because
-// distinguishing division from regular expressions would require a wider
-// expression grammar than this index promises.
+// complete token in a bounded local walk. Interpolations use the same lexical
+// delimiter rules as whole-file validation and hidden-use inventory.
 func (builder *javaScriptStructuralBuilder) finishTemplateTokens() string {
 	for index := range builder.tokens {
 		token := &builder.tokens[index]
@@ -391,50 +391,14 @@ func simpleJavaScriptStructuralTemplateEnd(source string, start int) (int, bool,
 }
 
 func simpleJavaScriptStructuralInterpolationEnd(source string, start int) (int, bool, bool) {
-	depth := 1
-	multiline := false
-	for index := start; index < len(source); {
-		switch source[index] {
-		case '\\':
-			return 0, multiline, false
-		case '\n', '\r':
-			multiline = true
-			index++
-		case '\'', '"':
-			end, ok := skipJavaScriptQuotedSyntax(source, index, len(source), source[index])
-			if !ok {
-				return 0, multiline, false
-			}
-			index = end
-		case '`':
-			end, nestedMultiline, ok := simpleJavaScriptStructuralTemplateEnd(
-				source,
-				index,
-			)
-			if !ok {
-				return 0, multiline, false
-			}
-			multiline = multiline || nestedMultiline
-			index = end
-		case '/':
-			return 0, multiline, false
-		case '{':
-			depth++
-			if depth > maxJavaScriptStructuralDepth {
-				return 0, multiline, false
-			}
-			index++
-		case '}':
-			depth--
-			index++
-			if depth == 0 {
-				return index, multiline, true
-			}
-		default:
-			index++
-		}
+	// Share the bounded lexer rather than treating every slash as an unknown
+	// delimiter. Regex literals and division must follow the same rules here
+	// as in the complete-file validation and hidden-write inventory.
+	end, ok := scanJavaScriptSyntax(source, start, len(source), '{', nil)
+	if !ok || end < start {
+		return 0, false, false
 	}
-	return 0, multiline, false
+	return end + 1, strings.ContainsAny(source[start:end], "\r\n"), true
 }
 
 func (builder *javaScriptStructuralBuilder) buildDelimiterMatches() bool {
@@ -1057,7 +1021,7 @@ func (builder *javaScriptStructuralBuilder) addStatement(
 		builder.useCount++
 		statement.Uses = append(statement.Uses, javaScriptStructuralUse{
 			Name: token.text,
-			Line: token.line,
+			Line: int(token.line),
 		})
 	}
 	builder.index.Statements = append(builder.index.Statements, statement)
@@ -1072,26 +1036,13 @@ func (builder *javaScriptStructuralBuilder) recordHiddenUses(start, end int, sco
 		return
 	}
 	fragment := builder.source[start:end]
-	occurrences, exact := scanJavaScriptIdentifierOccurrencesIncludingTemplateExpressionsExact(
-		fragment,
-		len(fragment),
-		builder.limits.uses,
-	)
-	if !exact {
-		builder.index.Disposition = javaScriptStructuralLimited
-		builder.index.Detail = fmt.Sprintf(
-			"JavaScript structural hidden-use limit %d reached",
-			builder.limits.uses,
-		)
-		return
-	}
 	if builder.hiddenUseKey == nil {
 		builder.hiddenUseKey = map[string]int{}
 	}
-	for _, occurrence := range occurrences {
+	exact := visitJavaScriptIdentifierOccurrences(fragment, len(fragment), true, func(occurrence javaScriptIdentifierOccurrence) bool {
 		if !occurrence.Reference ||
 			javaScriptStructuralMethodKeyOccurrence(fragment, occurrence) {
-			continue
+			return true
 		}
 		key := scopeKey + "\x00" + occurrence.Name
 		unsafeRuntime := !exactJavaScriptRuntimeRequireCallAt(
@@ -1104,7 +1055,7 @@ func (builder *javaScriptStructuralBuilder) recordHiddenUses(start, end int, sco
 			builder.index.HiddenUses[retained].UnsafeRuntime =
 				builder.index.HiddenUses[retained].UnsafeRuntime ||
 					unsafeRuntime
-			continue
+			return true
 		}
 		if len(builder.index.HiddenUses) >= builder.limits.uses {
 			builder.index.Disposition = javaScriptStructuralLimited
@@ -1112,7 +1063,7 @@ func (builder *javaScriptStructuralBuilder) recordHiddenUses(start, end int, sco
 				"JavaScript structural hidden-use limit %d reached",
 				builder.limits.uses,
 			)
-			return
+			return false
 		}
 		builder.hiddenUseKey[key] = len(builder.index.HiddenUses)
 		builder.index.HiddenUses = append(
@@ -1125,6 +1076,11 @@ func (builder *javaScriptStructuralBuilder) recordHiddenUses(start, end int, sco
 				UnsafeRuntime: unsafeRuntime,
 			},
 		)
+		return true
+	})
+	if !exact && !builder.failed() {
+		builder.index.Disposition = javaScriptStructuralLimited
+		builder.index.Detail = fmt.Sprintf("JavaScript structural hidden-use lexical scan was incomplete at byte %d (length %d)", start, end-start)
 	}
 }
 
@@ -1423,7 +1379,7 @@ func (builder *javaScriptStructuralBuilder) arrowSpan(
 	}
 	return javaScriptStructuralSpan{
 		start: start,
-		end:   builder.tokens[statementEnd].start,
+		end:   builder.tokens[statementEnd].end,
 	}, true
 }
 

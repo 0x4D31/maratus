@@ -496,14 +496,11 @@ func javaScriptIdentifierPositions(line, identifier string) []int {
 			index++
 			continue
 		}
-		if !javaScriptIdentifierStartByte(char) {
+		if !javaScriptIdentifierStartByte(char) && !javaScriptUnicodeIdentifierStart(line[index:]) {
 			index++
 			continue
 		}
-		end := index + 1
-		for end < len(line) && javaScriptIdentifierByte(line[end]) {
-			end++
-		}
+		end := javaScriptIdentifierEnd(line, index, len(line))
 		if line[index:end] == identifier {
 			positions = append(positions, index)
 		}

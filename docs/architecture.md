@@ -177,8 +177,15 @@ evidence is accepted only through a typed structural adapter that owns the
 relationship. The report loader rechecks these constraints instead of trusting
 serialized IDs.
 
-JavaScript uses a bounded structural index rather than evaluating source. An
-exact zero-argument whole-program IIFE may be treated as the module wrapper.
+JavaScript uses a bounded structural index rather than evaluating source.
+An ordinary Unicode identifier is retained as one token without normalization;
+escaped identifiers and unsupported code points remain outside the grammar.
+Structural tokens use a compact layout with a fixed count bounded by a 64 MiB
+retained-token payload allowance; this is not a limit on total process memory.
+Opaque-use inventory streams occurrences and deduplicates by scope and name,
+preserving later writes while bounding the number of retained distinct uses.
+
+An exact zero-argument whole-program IIFE may be treated as the module wrapper.
 A closed numeric bundle adapter can then connect exact CommonJS wrappers,
 loader dispatch, aliases, and supported calls through ordinary Features and
 operations. Exact bundled module wrappers remain useful `UNKNOWN` observations
