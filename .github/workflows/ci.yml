@@ -1,0 +1,178 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go (${{ matrix.os }}, ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            go: 1.26.10
+          - os: ubuntu-latest
+            go: 1.27.3
+          - os: macos-latest
+            go: 1.27.3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Format
+        run: |
+          gofmt -d .
+          test -z "$(gofmt -l .)"
+
+      - name: Verify generated rule catalog
+        run: |
+          go generate ./internal/rules
+          git diff --exit-code -- internal/rules/catalog_gen.go
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Staticcheck
+        # v0.8.1 cannot read Go 1.27's version-5 export data. Lint the
+        # supported minimum; both toolchains still run tests, vet and race.
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.26.10'
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+
+      - name: Race
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./cmd/maratus
+
+  fuzz:
+    name: bounded fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: true
+
+      - name: Exercise parser and report fuzz targets
+        run: |
+          set -euo pipefail
+          # A fixed iteration budget avoids Go's fuzz-deadline cancellation
+          # race (golang/go#75804). Go disables its test alarm during mutation,
+          # so an outer timeout bounds each target; all nonzero exits fail CI.
+          for package in ./internal/artifact ./internal/extract ./internal/plistx ./internal/report ./internal/shellparse; do
+            targets=$(go test "$package" -list '^Fuzz')
+            while IFS= read -r target; do
+              case "$target" in
+                Fuzz*) timeout --signal=TERM --kill-after=10s 90s go test "$package" -run '^$' -fuzz "^${target}$" -fuzztime=10000x -timeout=90s -parallel=2 ;;
+              esac
+            done <<< "$targets"
+          done
+
+  vulnerability:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: true
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Scan
+        run: |
+          govulncheck ./...
+          (cd tools/differential/go-macho && govulncheck ./...)
+
+  differential-helper:
+    name: development differential helper
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache-dependency-path: tools/differential/go-macho/go.sum
+
+      - name: Verify, test, vet, and build
+        working-directory: tools/differential/go-macho
+        run: |
+          go mod verify
+          go test ./...
+          go vet ./...
+          CGO_ENABLED=0 go build -trimpath -o /tmp/maratus-go-macho-diff .
+
+  cross-build:
+    name: release target cross-builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.27.3
+          cache: true
+
+      - name: Build release targets
+        run: |
+          set -euo pipefail
+          for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath -buildvcs=false \
+              -o "/tmp/maratus_${goos}_${goarch}" ./cmd/maratus
+          done
