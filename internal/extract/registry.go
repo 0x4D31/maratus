@@ -115,7 +115,7 @@ func Run(ctx Context) behavior.Graph {
 		}
 		switch content.Kind {
 		case "macho", "macho-fat":
-			ExtractMachO(&graph, content, ctx.Options)
+			extractMachOWithRawFeatures(&graph, content, ctx.Options, &rawFeatures)
 		case "agent-skill":
 			ExtractAgentSkill(&graph, content)
 		case "plist":

@@ -3653,7 +3653,7 @@ func TestExtractMachOPreflightRejectionAddsPartialCoverage(t *testing.T) {
 	content := artifact.Content{NodeID: "node-1", LogicalPath: "sample", Data: data}
 
 	ExtractMachO(&graph, content, artifact.Options{})
-	if len(graph.Coverage) != 1 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "structure validation rejected") {
+	if len(graph.Coverage) != 2 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "structure validation rejected") {
 		t.Fatalf("missing explicit structure-validation coverage: %#v", graph.Coverage)
 	}
 }
@@ -3739,7 +3739,7 @@ func TestExtractMachORejectsOverflowedUndefinedSymbolRangeWithoutPanic(t *testin
 
 	var graph behavior.Graph
 	ExtractMachO(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "overflow", Data: data}, artifact.Options{})
-	if len(graph.Coverage) != 1 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "undefined symbol range") {
+	if len(graph.Coverage) != 2 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "undefined symbol range") {
 		t.Fatalf("overflowed DYSYMTAB was not rejected before debug/macho: %#v", graph.Coverage)
 	}
 }
@@ -3761,7 +3761,7 @@ func TestExtractMachORejectsFatOuterInnerCPUMismatch(t *testing.T) {
 
 	var graph behavior.Graph
 	ExtractMachO(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "mismatch", Data: data}, artifact.Options{})
-	if len(graph.Coverage) != 1 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "disagrees with inner slice") {
+	if len(graph.Coverage) != 2 || graph.Coverage[0].Status != "partial" || !strings.Contains(graph.Coverage[0].Detail, "disagrees with inner slice") {
 		t.Fatalf("fat CPU mismatch was not rejected with explicit coverage: %#v", graph.Coverage)
 	}
 	if len(graph.Features) != 0 || len(graph.Operations) != 0 {
