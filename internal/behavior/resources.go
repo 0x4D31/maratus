@@ -202,6 +202,9 @@ func NormalizeResourceBindings(kind OperationKind, bindings []ResourceBinding) (
 	}
 	merged := make(map[mergeKey]ResourceBinding, len(bindings))
 	for index, binding := range bindings {
+		if binding.FilePathInterpretation > FilePathHomeRelative {
+			return nil, fmt.Errorf("resource_bindings[%d] has invalid transient path interpretation", index)
+		}
 		if len(binding.EvidenceIDs) > MaxResourceBindingEvidenceIDs {
 			return nil, fmt.Errorf("resource_bindings[%d].evidence_ids has %d items; limit is %d", index, len(binding.EvidenceIDs), MaxResourceBindingEvidenceIDs)
 		}
@@ -216,6 +219,9 @@ func NormalizeResourceBindings(kind OperationKind, bindings []ResourceBinding) (
 		binding.EvidenceIDs = sortedUniqueStrings(append([]string(nil), binding.EvidenceIDs...))
 		key := mergeKey{role: binding.Role, kind: resource.Kind, value: resource.Value}
 		if existing, ok := merged[key]; ok {
+			if existing.FilePathInterpretation != binding.FilePathInterpretation {
+				existing.FilePathInterpretation = FilePathUnknown
+			}
 			existing.Resource.Classifications = append(existing.Resource.Classifications, resource.Classifications...)
 			existing.Resource, _ = NormalizeResource(existing.Resource)
 			existing.EvidenceIDs = sortedUniqueStrings(append(existing.EvidenceIDs, binding.EvidenceIDs...))

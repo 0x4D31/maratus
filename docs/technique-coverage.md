@@ -21,6 +21,16 @@ NUL-terminated strings, including valid empty arguments. Their bindings retain
 the vector terminator as evidence. Argument-dependent classifications require
 the complete binding and its evidence to fit the report budgets.
 
+Filesystem flow correlation requires compatible path interpretation as well as
+source order and execution context. Shell relative paths join only within a
+retained stable working-directory context; current-home expansion has a separate
+context. Directory changes, HOME changes and unsupported state-changing syntax
+invalidate the applicable proof. Quoted or escaped tilde paths are literal;
+named-user and shell-specific tilde expansions remain unresolved for correlation.
+Other adapters do not acquire a working-directory proof merely from equal
+relative operand text. Intervening modeled mutations with unresolved file targets
+also prevent attributing earlier produced bytes to a later consumer.
+
 JavaScript AST call operands support bounded primitive-string bindings from
 unwritten lexical declarations and function-local variables, all-string
 concatenation, untagged string templates, and complete literal argv arrays.

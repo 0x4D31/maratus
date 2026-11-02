@@ -1,7 +1,10 @@
 package extract
 
 import (
+	"path"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/0x4D31/maratus/internal/behavior"
 )
@@ -113,6 +116,7 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 		context behavior.ContextKey
 	}
 	byTarget := map[relationGroupKey]*relationGroup{}
+	unknownMutations := map[behavior.ContextKey][]behavior.ModeledOperation{}
 	scopeLinks := operationScopeLinks(graph)
 
 	for _, operation := range graph.Operations {
@@ -121,6 +125,9 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 			continue
 		}
 		target, targetOK := relationTargetKey(operation)
+		if !targetOK && operationMayMutateFile(operation.Kind) {
+			unknownMutations[context] = append(unknownMutations[context], operation)
+		}
 		if targetOK {
 			key := relationGroupKey{target: target, context: context}
 			if byTarget[key] == nil {
@@ -160,6 +167,8 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 					byTarget[sourceKey] = &relationGroup{}
 				}
 				byTarget[sourceKey].invalidators = append(byTarget[sourceKey].invalidators, operation)
+			} else if !sourceOK && targetOK {
+				unknownMutations[context] = append(unknownMutations[context], operation)
 			}
 		}
 	}
@@ -190,7 +199,7 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 				if !scopeLinks.compatible(archive.ScopeID, upload.ScopeID) || !operationBefore(archive, upload) {
 					continue
 				}
-				intervening, complete := interveningFileMutation(archive, upload, group.invalidators, &work)
+				intervening, complete := interveningFileMutation(archive, upload, group.invalidators, unknownMutations[key.context], &work)
 				if !complete {
 					markDerivedWorkLimit(graph, "operation-relation-linking", workLimit, "operation-relation candidates")
 					return
@@ -217,7 +226,7 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 				if !scopeLinks.compatible(download.ScopeID, exec.ScopeID) || !operationBefore(download, exec) {
 					continue
 				}
-				intervening, complete := interveningFileMutation(download, exec, group.invalidators, &work)
+				intervening, complete := interveningFileMutation(download, exec, group.invalidators, unknownMutations[key.context], &work)
 				if !complete {
 					markDerivedWorkLimit(graph, "operation-relation-linking", workLimit, "operation-relation candidates")
 					return
@@ -255,24 +264,37 @@ func linkOperationRelations(graph *behavior.Graph, workLimit int) {
 	}
 }
 
-func interveningFileMutation(producer, consumer behavior.ModeledOperation, invalidators []behavior.ModeledOperation, work *derivedWorkBudget) (bool, bool) {
-	for _, other := range invalidators {
-		if other.ID == producer.ID {
-			continue
-		}
-		if !work.take() {
-			return false, false
-		}
-		afterProducer, afterKnown := compareOperationSource(producer, other)
-		beforeConsumer, beforeKnown := compareOperationSource(other, consumer)
-		if !afterKnown || !beforeKnown {
-			// Another mutation of the same filesystem resource exists but cannot be placed
-			// outside the candidate interval. Do not claim which bytes the
-			// consumer receives.
-			return true, true
-		}
-		if afterProducer < 0 && beforeConsumer <= 0 {
-			return true, true
+func operationMayMutateFile(kind behavior.OperationKind) bool {
+	switch kind {
+	case behavior.OperationArchiveCreate, behavior.OperationNetworkDownload,
+		behavior.OperationDirectoryCreate, behavior.OperationFileCopy,
+		behavior.OperationFileDelete, behavior.OperationFileMove,
+		behavior.OperationFileWrite, behavior.OperationPlistModify,
+		behavior.OperationScreenCapture, behavior.OperationShellProfileModify:
+		return true
+	}
+	return false
+}
+
+func interveningFileMutation(producer, consumer behavior.ModeledOperation, invalidators, unknown []behavior.ModeledOperation, work *derivedWorkBudget) (bool, bool) {
+	for _, candidates := range [2][]behavior.ModeledOperation{invalidators, unknown} {
+		for _, other := range candidates {
+			if other.ID == producer.ID {
+				continue
+			}
+			if !work.take() {
+				return false, false
+			}
+			afterProducer, afterKnown := compareOperationSource(producer, other)
+			beforeConsumer, beforeKnown := compareOperationSource(other, consumer)
+			if !afterKnown || !beforeKnown {
+				// A same-resource or unresolved mutation cannot be placed
+				// outside the interval. Do not claim which bytes are consumed.
+				return true, true
+			}
+			if afterProducer < 0 && beforeConsumer <= 0 {
+				return true, true
+			}
 		}
 	}
 	return false, true
@@ -560,6 +582,29 @@ func relationResourceKey(operation behavior.ModeledOperation, role behavior.Reso
 	target, ok := binding.Resource.CorrelationKey()
 	if !ok {
 		return "", false
+	}
+	if !path.IsAbs(binding.Resource.Value) {
+		context := operation.WorkingDirectoryContext
+		mode := behavior.FilePathLiteral
+		// A leading ./ does not turn a literal tilde directory into HOME.
+		value := binding.Resource.Value
+		for strings.HasPrefix(value, "./") {
+			value = strings.TrimPrefix(value, "./")
+		}
+		if strings.HasPrefix(value, "~") {
+			mode = binding.FilePathInterpretation
+			if mode == behavior.FilePathHomeRelative {
+				context = operation.HomeDirectoryContext
+			} else if mode != behavior.FilePathLiteral {
+				return "", false
+			}
+		}
+		if context == 0 {
+			return "", false
+		}
+		// ResourceIdentityKey itself is length-prefixed. Wrap it with a
+		// parser-owned context; no sample-controlled path acts as a sentinel.
+		target = behavior.ResourceIdentityKey(strconv.Itoa(int(mode)) + ":" + strconv.Itoa(context) + ":" + string(target))
 	}
 	return target, true
 }

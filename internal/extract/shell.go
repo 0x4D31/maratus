@@ -71,32 +71,39 @@ func analyzeShellLineVariables(graph *behavior.Graph, content artifact.Content, 
 	}
 	if unsupportedGrouping {
 		invalidateAllShellBindings(variables, variableScope)
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "shell grouping/subshell syntax is present; grouped execution was not modeled")
 	}
 	if unsupportedExpansion {
 		invalidateAllShellBindings(variables, variableScope)
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "braced shell parameter expansion is present; expansion contents and surrounding execution were not modeled")
 		return
 	}
 	if malformedStructure {
 		invalidateAllShellBindings(variables, variableScope)
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "malformed or unclosed shell substitution/grouping was not analyzed")
 		return
 	}
 	malformedOperators, unsupportedPipeBoth, unsupportedBackground, unsupportedBraceGroup := shellTopLevelOperatorStatus(line)
 	if unsupportedPipeBoth {
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "the |& combined stdout/stderr pipeline operator is present; that pipeline was not modeled")
 		return
 	}
 	if unsupportedBackground {
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "a background-command separator is present; background execution and surrounding commands were not modeled")
 		return
 	}
 	if unsupportedBraceGroup {
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "shell brace-group syntax is present; grouped execution and surrounding commands were not modeled")
 		return
 	}
 	if malformedOperators {
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "a shell pipeline or conditional operator has a missing operand; the malformed command was not analyzed")
 		return
 	}
@@ -122,16 +129,24 @@ func analyzeShellLineVariables(graph *behavior.Graph, content artifact.Content, 
 		statementOrdinal := order.next
 		operationStart := len(graph.Operations)
 		defer annotateShellOperationOrder(graph, operationStart, order.group, statementOrdinal, order.uncertain)
-		fields, err := shellCommandFields(command)
+		context := variables.directoryContext(graph, variableScope)
+		fields, raw, err := shellCommandFieldsRaw(command)
+		defer func() { annotateShellPathContexts(graph, operationStart, context, fields, raw) }()
 		if shellFieldLimitReached(err) {
+			variables.invalidateDirectoryContext(variableScope, true, true)
 			fieldLimitHit = true
 			return false
 		}
 		if err == nil {
 			if assignments, ok := shellAssignments(fields); ok {
-				for _, assignment := range assignments {
+				for index, assignment := range assignments {
 					name, value := assignment.name, assignment.value
-					if order.uncertain || !safeShellVarValue(value) {
+					if name == "HOME" {
+						variables.invalidateDirectoryContext(variableScope, false, true)
+					}
+					word := raw[len(fields)-len(assignments)+index]
+					tilde := shellWordExpandsHome(strings.TrimPrefix(word, name+"="))
+					if order.uncertain || !safeShellVarValue(value) || tilde {
 						variables.invalidateVariable(variableScope, name)
 					} else {
 						if variables.setVariable(variableScope, name, value) {
@@ -158,6 +173,7 @@ func analyzeShellLineVariables(graph *behavior.Graph, content artifact.Content, 
 		commandContent := content
 		commandContent.SupportingEvidenceIDs = append(append([]string(nil), content.SupportingEvidenceIDs...), variables.usedShellOrigins...)
 		if len(variables.usedShellOrigins) > 0 && 1+len(commandContent.SupportingEvidenceIDs) > maxShellOperationEvidenceIDs {
+			variables.invalidateDirectoryContext(variableScope, true, true)
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "variable expansion evidence limit reached; command semantics were not inferred")
 			return true
 		}
@@ -168,22 +184,27 @@ func analyzeShellLineVariables(graph *behavior.Graph, content artifact.Content, 
 		if strings.Contains(command, "|") && handlePipeline(graph, commandContent, command, lineNo, execution, evidenceID, expansionDepth, order) {
 			return true
 		}
-		fields, err = shellCommandFields(command)
+		fields, raw, err = shellCommandFieldsRaw(command)
 		if shellFieldLimitReached(err) {
+			variables.invalidateDirectoryContext(variableScope, true, true)
 			fieldLimitHit = true
 			return false
 		}
 		if err != nil {
+			variables.invalidateDirectoryContext(variableScope, true, true)
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "malformed shell syntax was not analyzed")
 			return true
 		}
 		if len(fields) == 0 {
 			return true
 		}
+		working, home := shellDirectoryEffects(fields)
+		defer variables.invalidateDirectoryContext(variableScope, working, home)
 		analyzeShellFields(graph, commandContent, fields, lineNo, execution, evidenceID, expansionDepth, order)
 		return true
 	})
 	if statementLimitHit {
+		variables.invalidateDirectoryContext(variableScope, true, true)
 		addPartialCoverageOnce(
 			graph,
 			content.NodeID,
@@ -940,19 +961,24 @@ func shellAssignmentMayExecute(fields []string) bool {
 // shellCommandFields recognizes grammar only from exact unquoted source words.
 // Decoded argv from launchd or native calls must never pass through this step.
 func shellCommandFields(command string) ([]string, error) {
+	fields, _, err := shellCommandFieldsRaw(command)
+	return fields, err
+}
+
+func shellCommandFieldsRaw(command string) ([]string, []string, error) {
 	fields, raw, err := shellparse.FieldsWithRaw(command)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(fields) != len(raw) {
-		return nil, shellparse.ErrUnsupportedSyntax
+		return nil, nil, shellparse.ErrUnsupportedSyntax
 	}
 	for len(fields) > 0 && raw[0] == fields[0] {
 		switch fields[0] {
 		case "if", "elif", "while", "until", "then", "do", "else", "!":
 			fields, raw = fields[1:], raw[1:]
 		case "fi", "done", "esac":
-			return nil, nil
+			return nil, nil, nil
 		default:
 			goto ready
 		}
@@ -962,10 +988,10 @@ ready:
 	// shell assignment. The argv normalizer cannot preserve that distinction.
 	for i, field := range fields {
 		if name, _, ok := splitShellAssignment(field); ok && !strings.HasPrefix(raw[i], name+"=") {
-			return nil, shellparse.ErrUnsupportedSyntax
+			return nil, nil, shellparse.ErrUnsupportedSyntax
 		}
 	}
-	return fields, nil
+	return fields, raw, nil
 }
 
 func splitShellAssignment(field string) (string, string, bool) {
@@ -3010,15 +3036,17 @@ func invalidateAllShellBindings(state *textVariableState, scope string) {
 
 func retainStandaloneShellAssignments(line string, state *textVariableState, scope string, uncertain bool, graph *behavior.Graph, content artifact.Content, lineNo int) {
 	var assignments []shellAssignment
+	var assignmentWords []string
 	count := 0
 	visitCommands(line, func(command string) bool {
 		count++
 		if count > 1 {
 			return false
 		}
-		fields, err := shellCommandFields(command)
+		fields, raw, err := shellCommandFieldsRaw(command)
 		if err == nil {
 			assignments, _ = shellAssignments(fields)
+			assignmentWords = raw[len(fields)-len(assignments):]
 		}
 		return true
 	})
@@ -3029,8 +3057,12 @@ func retainStandaloneShellAssignments(line string, state *textVariableState, sco
 	if len(assignments) > 0 {
 		evidenceID = addLineEvidence(graph, content, lineNo, "shell-variable-assignment", line)
 	}
-	for _, assignment := range assignments {
-		if uncertain || !safeShellVarValue(assignment.value) {
+	for index, assignment := range assignments {
+		if assignment.name == "HOME" {
+			state.invalidateDirectoryContext(scope, false, true)
+		}
+		tilde := shellWordExpandsHome(strings.TrimPrefix(assignmentWords[index], assignment.name+"="))
+		if uncertain || !safeShellVarValue(assignment.value) || tilde {
 			state.invalidateVariable(scope, assignment.name)
 		} else {
 			if evidenceID != "" && state.setVariable(scope, assignment.name, assignment.value) {

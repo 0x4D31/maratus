@@ -624,7 +624,8 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			}
 		}
 		pythonAPICandidate := language == "python" && pythonSourceAPICallObserved(analysisLine, lineNo, &pythonAPIBindings, pythonOrderedState)
-		if len(directCalls) == 0 && len(assignedURLs) == 0 && !javascriptProcess.candidate && !javascriptProcess.unmodeledOuter && !pythonAPICandidate && pythonStableSubprocessBinding == "" && !networkCall && !lineMayHaveSemanticsBudget(language, analysisLine, lineBudget) {
+		shellStateRelevant := language == "shell" && shellDirectoryStateRelevant(analysisLine)
+		if len(directCalls) == 0 && len(assignedURLs) == 0 && !javascriptProcess.candidate && !javascriptProcess.unmodeledOuter && !pythonAPICandidate && pythonStableSubprocessBinding == "" && !networkCall && !shellStateRelevant && !lineMayHaveSemanticsBudget(language, analysisLine, lineBudget) {
 			continue
 		}
 		lineContent := content
