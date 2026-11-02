@@ -211,6 +211,11 @@ func jsAPINetwork(module, method string, minArgs, maxArgs int) javaScriptAPISpec
 		resources: []javaScriptAPIResourceSpec{{role: behavior.ResourceRoleRemoteDestination, kind: behavior.ResourceURL, index: 0}}}
 }
 
+func exactJavaScriptHTTPURL(value string) bool {
+	lower := strings.ToLower(value)
+	return (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) && exactJavaScriptFeatureURL(value)
+}
+
 func jsAPIName(module, method string, minArgs, maxArgs int) javaScriptAPISpec {
 	return javaScriptAPISpec{module: module, method: method, kind: behavior.OperationNameResolve, minArgs: minArgs, maxArgs: maxArgs,
 		resources: []javaScriptAPIResourceSpec{{role: behavior.ResourceRoleSource, kind: behavior.ResourceIdentifier, index: 0}}}
@@ -342,9 +347,13 @@ func extractJavaScriptSourceAPIs(graph *behavior.Graph, content artifact.Content
 						var resolved bool
 						value, resourceProofs, resolved = valueState.resolveExpression(arguments[resourceSpec.index], scope, 0)
 						if !resolved {
-							value = resolveStringExpression("javascript", arguments[resourceSpec.index], nil)
+							value = ""
 						}
-						operationEvidenceIDs = append(operationEvidenceIDs, javaScriptAPIProofEvidence(graph, content, resourceProofs)...)
+						retained := javaScriptAPIProofEvidence(graph, content, resourceProofs)
+						if len(retained) != len(resourceProofs) {
+							value = ""
+						}
+						operationEvidenceIDs = append(operationEvidenceIDs, retained...)
 						if value == "" {
 							unresolved = true
 						}
@@ -353,12 +362,9 @@ func extractJavaScriptSourceAPIs(graph *behavior.Graph, content artifact.Content
 					if resourceSpec.kind == behavior.ResourceFile && value != "" {
 						resource = classifiedFileResource(value)
 					} else if resourceSpec.kind == behavior.ResourceURL {
-						resolved := destinations(value)
-						if len(resolved) == 0 {
+						if !exactJavaScriptHTTPURL(value) {
 							unresolved = true
 							resource = behavior.NewResource(behavior.ResourceURL, "")
-						} else {
-							resource = behavior.NewResource(behavior.ResourceURL, resolved[0])
 						}
 					}
 					resourceBindings = append(resourceBindings, behavior.Bind(resourceSpec.role, resource))
@@ -412,7 +418,7 @@ func extractJavaScriptSourceAPIs(graph *behavior.Graph, content artifact.Content
 	}
 	if unsupported {
 		addPartialCoverageOnce(graph, content.NodeID, javaScriptAPIBindingAnalysisArea,
-			"a recognized Node builtin binding or call was duplicated, reassigned, opaque, malformed, outside the exact call grammar, or used through unsupported data flow; affected calls remained observational")
+			"a recognized Node builtin binding or call was duplicated, reassigned, opaque, malformed, outside the exact call grammar, or used through unsupported data flow; unproved call identities remain observational and unsupported operands remain unresolved")
 	}
 }
 
@@ -486,8 +492,8 @@ func javaScriptBuiltinFetchIdentitySafe(prescan javaScriptCommandPrescan) bool {
 }
 
 // extractJavaScriptBuiltinFetchCalls models only a globally unshadowed direct
-// fetch call with one exact remote URL. Dynamic Request objects, relative URLs,
-// and unsupported value flow remain observations rather than network actions.
+// fetch call. Unsupported destination values remain unknown; a URL substring
+// does not establish the destination or successful communication.
 func extractJavaScriptBuiltinFetchCalls(graph *behavior.Graph, content artifact.Content, statement javaScriptCommandStatement, state *javaScriptCommandState) bool {
 	occurrences, exact := scanJavaScriptIdentifierOccurrencesExact(statement.text, maxJavaScriptAPICallBytes, maxJavaScriptCommandIdentifiersPerStatement)
 	if !exact {
@@ -511,12 +517,16 @@ func extractJavaScriptBuiltinFetchCalls(graph *behavior.Graph, content artifact.
 		}
 		value, proofs, resolved := state.resolveExpression(arguments[0], statement.scopeKey, 0)
 		if !resolved {
-			value = resolveStringExpression("javascript", arguments[0], nil)
+			value = ""
 		}
-		destination := destinations(value)
-		if len(destination) == 0 {
+		var destination []string
+		resourceBinding := "unresolved"
+		if exactJavaScriptHTTPURL(value) {
+			destination = []string{value}
+			resourceBinding = "exact-static"
+		} else {
+			value = ""
 			complete = false
-			continue
 		}
 		scopeID := scopeIDForJavaScriptStatement(graph, content, statement)
 		lineContent := artifact.Content{
@@ -525,6 +535,10 @@ func extractJavaScriptBuiltinFetchCalls(graph *behavior.Graph, content artifact.
 		}
 		callEvidenceID := addLineEvidence(graph, lineContent, statement.line, "javascript-api-call", statement.evidenceText)
 		proofEvidenceIDs := javaScriptAPIProofEvidence(graph, content, proofs)
+		if len(proofEvidenceIDs) != len(proofs) {
+			value, destination, resourceBinding = "", nil, "unresolved"
+			complete = false
+		}
 		evidenceIDs := mergeEvidenceIDs(append([]string{callEvidenceID}, proofEvidenceIDs...)...)
 		if callEvidenceID == "" {
 			return false
@@ -535,12 +549,12 @@ func extractJavaScriptBuiltinFetchCalls(graph *behavior.Graph, content artifact.
 			Kind:             kind,
 			ResourceBindings: networkOperationBindings(kind, destination, "", ""),
 			Qualifiers: map[string]string{
-				"api": "fetch", "api_identity": "unshadowed-runtime-builtin-and-exact-call", "resource_binding": "exact-static",
+				"api": "fetch", "api_identity": "unshadowed-runtime-builtin-and-exact-call", "resource_binding": resourceBinding,
 			},
 			EvidenceIDs: evidenceIDs, Support: behavior.SupportCorroborated,
 			Execution: executionContextForContent(lineContent), Line: statement.line,
 		}
-		if enrichExistingJavaScriptFetchOperation(graph, candidate, destination[0]) {
+		if enrichExistingJavaScriptFetchOperation(graph, candidate, value) {
 			continue
 		}
 		operationID := graph.AddOperation(candidate)
@@ -599,6 +613,10 @@ func enrichExistingJavaScriptFetchOperation(graph *behavior.Graph, candidate beh
 
 func operationHasNetworkDestination(operation behavior.ModeledOperation, destination string) bool {
 	for _, binding := range operation.ResourceBindings {
+		if destination == "" && (binding.Role == behavior.ResourceRoleRemoteSource || binding.Role == behavior.ResourceRoleRemoteDestination) &&
+			binding.Resource.Kind == behavior.ResourceNetworkEndpoint && binding.Resource.Value == "" {
+			return true
+		}
 		if binding.Resource.Kind == behavior.ResourceURL && binding.Resource.Value == destination {
 			return true
 		}
@@ -650,6 +668,53 @@ func javaScriptAPIProofEvidence(graph *behavior.Graph, content artifact.Content,
 		}
 	}
 	return evidenceIDs
+}
+
+// The request/write tracker uses the same closed value grammar as the API
+// recognizer. Generic text assignments can retain prefixes or undecoded
+// escapes, so they cannot establish a JavaScript request destination.
+func javaScriptFetchLineDestinations(state *javaScriptCommandState, statements []javaScriptCommandStatement) ([]string, []javaScriptCommandProof, bool) {
+	var destination []string
+	var proof []javaScriptCommandProof
+	calls := 0
+	complete := true
+	for _, statement := range statements {
+		state.observe(statement.text, statement.scopeKey, statement.line)
+		occurrences, exact := scanJavaScriptIdentifierOccurrencesExact(statement.text, maxJavaScriptAPICallBytes, maxJavaScriptCommandIdentifiersPerStatement)
+		if !exact {
+			state.invalidateScope(statement.scopeKey)
+			complete = false
+			continue
+		}
+		for _, occurrence := range occurrences {
+			if occurrence.Name != "fetch" || occurrence.Write || occurrence.previousToken == "." {
+				continue
+			}
+			open := skipJavaScriptSpace(statement.text, occurrence.Offset+len("fetch"))
+			text, _, call := exactJavaScriptCallContent(statement.text, open, maxJavaScriptAPICallBytes)
+			args, known := splitJavaScriptArgumentsExact(text, maxJavaScriptAPICallBytes, maxTextStringExpressionArguments)
+			if !call || !known || len(args) < 1 || len(args) > 2 || javaScriptArgumentsContainSpread(args) {
+				continue
+			}
+			calls++
+			if calls > 1 {
+				// Per-line response tracking cannot distinguish these calls.
+				// The structural API pass retains their individual requests.
+				continue
+			}
+			value, causal, resolved := state.resolveExpression(args[0], statement.scopeKey, 0)
+			for _, origin := range causal {
+				resolved = resolved && origin.scopeKey == statement.scopeKey
+			}
+			if resolved && exactJavaScriptHTTPURL(value) {
+				destination, proof = []string{value}, causal
+			}
+		}
+	}
+	if !complete || calls != 1 {
+		return nil, nil, false
+	}
+	return destination, proof, true
 }
 
 func mergeEvidenceIDs(ids ...string) []string {

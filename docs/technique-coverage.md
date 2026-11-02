@@ -21,6 +21,24 @@ NUL-terminated strings, including valid empty arguments. Their bindings retain
 the vector terminator as evidence. Argument-dependent classifications require
 the complete binding and its evidence to fit the report budgets.
 
+JavaScript AST call operands support bounded primitive-string bindings from
+unwritten lexical declarations and function-local variables, all-string
+concatenation, untagged string templates, and complete literal argv arrays.
+Declaration, transformation, and call evidence are retained. Top-level `var`
+exposure, captured values, mutable bound arrays, dynamic coercions, and
+incompatible function/block proof contexts remain unresolved. Existing host,
+namespace, mutation, launch-option, and capability-support requirements apply.
+Unpaired UTF-16 surrogates remain unresolved rather than becoming replacement
+characters. A proved process API request remains visible when its command has
+no more specific supported shell semantics; that alone does not resolve an
+executable or establish downstream behavior.
+
+JavaScript HTTP API destinations require a complete supported URL operand.
+URLs found inside prose or unsupported values remain observations; they are
+not selected endpoints. An exact unshadowed `fetch` request with an unresolved
+destination retains a neutral network operation with an unknown endpoint.
+Neither the call nor its static connectivity establishes successful contact.
+
 | Area | Technique | Typed model | Adapters | Status and boundary |
 | --- | --- | --- | --- | --- |
 | Activation | App, package, project, extension, module, package lifecycle, Cargo build script | roots and invoked targets | artifact metadata | supported for documented bounded profiles; dependency selection and runtime success remain conditional |

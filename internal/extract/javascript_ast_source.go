@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -59,6 +60,7 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 		return
 	}
 	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: []int{0}}
+	state.values = newJavaScriptASTValues(bindings)
 	for offset, char := range source {
 		if char == '\n' {
 			state.lines = append(state.lines, offset+1)
@@ -87,15 +89,22 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 			continue
 		}
 		if identifier, ok := call.Callee.(*ast.Identifier); ok && identifier.Name.String() == "fetch" && fetchSafe && bindings.lookup(located.scope, "fetch") == nil && state.exactIdentifier(identifier) {
-			if len(call.ArgumentList) != 1 || len(destinations(javaScriptASTLiteralString(call.ArgumentList[0]))) == 0 {
+			if len(call.ArgumentList) != 1 {
 				continue
+			}
+			if _, spread := call.ArgumentList[0].(*ast.SpreadElement); spread {
+				continue
+			}
+			value, proof, resolved := state.stringValue(call.ArgumentList[0], located.scope, located.span.start)
+			if !resolved || !exactJavaScriptHTTPURL(value) {
+				value = ""
 			}
 			calls++
 			if calls > maxJavaScriptAPICalls {
 				addPartialCoverageOnce(graph, content.NodeID, javaScriptASTAnalysisArea, fmt.Sprintf("AST API call budget of %d reached; later calls were omitted", maxJavaScriptAPICalls))
 				break
 			}
-			state.fetch(located, call)
+			state.fetch(located, call, value, proof)
 			continue
 		}
 		dot, ok := call.Callee.(*ast.DotExpression)
@@ -153,32 +162,36 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 			continue
 		}
 		if process {
-			state.process(callContent, call, located.span, method, name.Name.String(), proof)
+			state.process(callContent, call, located.scope, located.span, method, name.Name.String(), proof)
 			continue
 		}
 		resources := make([]behavior.ResourceBinding, 0, len(spec.resources))
 		unresolved := false
 		for _, resourceSpec := range spec.resources {
 			value := resourceSpec.fixed
+			var valueProof []string
 			if resourceSpec.index >= 0 {
-				value = javaScriptASTLiteralString(call.ArgumentList[resourceSpec.index])
+				value, valueProof, _ = state.stringValue(call.ArgumentList[resourceSpec.index], located.scope, located.span.start)
+				if merged, retained := mergeJavaScriptASTValueEvidence(proof, valueProof); retained {
+					proof = merged
+				} else {
+					value, valueProof = "", nil
+					addPartialCoverageOnce(graph, content.NodeID, "javascript-ast-value-analysis", "causal value evidence exceeded retained bounds; affected resources remain unknown")
+				}
 			}
 			resource := behavior.NewResource(resourceSpec.kind, value)
 			if resourceSpec.kind == behavior.ResourceFile && value != "" {
 				resource = classifiedFileResource(value)
 			}
 			if resourceSpec.kind == behavior.ResourceURL {
-				resolved := destinations(value)
-				if len(resolved) == 0 {
+				if !exactJavaScriptHTTPURL(value) {
 					resource = behavior.NewResource(behavior.ResourceURL, "")
-				} else {
-					resource = behavior.NewResource(behavior.ResourceURL, resolved[0])
 				}
 			}
 			if resource.Value == "" {
 				unresolved = true
 			}
-			resources = append(resources, behavior.Bind(resourceSpec.role, resource))
+			resources = append(resources, behavior.Bind(resourceSpec.role, resource, valueProof...))
 		}
 		resourceState := "exact-static"
 		if unresolved {
@@ -200,6 +213,12 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 			observation.EvidenceIDs = proof
 			graph.AddNetworkImplementation(observation)
 		}
+	}
+	if state.values.limited {
+		addPartialCoverageOnce(graph, content.NodeID, "javascript-ast-value-analysis", "bounded lexical string resolution reached its value, depth, work or provenance limit; unresolved values remain unknown")
+	}
+	if state.values.encodingUnsupported {
+		addPartialCoverageOnce(graph, content.NodeID, "javascript-ast-string-encoding", "some JavaScript strings contain unpaired UTF-16 surrogates; they were not replaced with guessed UTF-8 operands")
 	}
 }
 
@@ -237,7 +256,7 @@ func (bindings *javaScriptASTBindings) builtinFetchSafe() bool {
 	return true
 }
 
-func (state *javaScriptASTExtraction) fetch(located javaScriptASTNode, call *ast.CallExpression) {
+func (state *javaScriptASTExtraction) fetch(located javaScriptASTNode, call *ast.CallExpression, value string, proof []string) {
 	content, ok := state.scopeContent(located.scope)
 	if !ok {
 		return
@@ -246,12 +265,22 @@ func (state *javaScriptASTExtraction) fetch(located javaScriptASTNode, call *ast
 	if evidence == "" {
 		return
 	}
-	destination := destinations(javaScriptASTLiteralString(call.ArgumentList[0]))
+	var destination []string
+	resourceBinding := "unresolved"
+	if value != "" {
+		destination = []string{value}
+		resourceBinding = "exact-static"
+	}
+	bindings := networkOperationBindings(behavior.OperationNetworkConnect, destination, "", "")
+	for i := range bindings {
+		bindings[i].EvidenceIDs = append([]string(nil), proof...)
+	}
+	proof = append([]string{evidence}, proof...)
 	operationID := state.graph.AddOperation(behavior.ModeledOperation{
 		SubjectNodeID: content.NodeID, ScopeID: content.ScopeID, SourceFunction: content.Function,
-		Kind: behavior.OperationNetworkConnect, ResourceBindings: networkOperationBindings(behavior.OperationNetworkConnect, destination, "", ""),
-		Qualifiers:  map[string]string{"api": "fetch", "api_identity": "unshadowed-runtime-builtin-and-exact-call", "resource_binding": "exact-static"},
-		EvidenceIDs: []string{evidence}, Support: behavior.SupportCorroborated, Execution: executionContextForContent(content), Line: state.line(located.span.start),
+		Kind: behavior.OperationNetworkConnect, ResourceBindings: bindings,
+		Qualifiers:  map[string]string{"api": "fetch", "api_identity": "unshadowed-runtime-builtin-and-exact-call", "resource_binding": resourceBinding},
+		EvidenceIDs: proof, Support: behavior.SupportCorroborated, Execution: executionContextForContent(content), Line: state.line(located.span.start),
 	})
 	if operationID == "" {
 		return
@@ -259,15 +288,18 @@ func (state *javaScriptASTExtraction) fetch(located javaScriptASTNode, call *ast
 	observation := networkImplementationObservation(operationID, content, "javascript", evidence)
 	observation.APIOrTool = "fetch"
 	observation.HTTPImplementation = "WHATWG fetch runtime implementation"
+	observation.EvidenceIDs = proof
 	state.graph.AddNetworkImplementation(observation)
 }
 
 type javaScriptASTExtraction struct {
-	graph   *behavior.Graph
-	content artifact.Content
-	doc     *javaScriptASTDocument
-	scopes  map[int]string
-	lines   []int
+	graph         *behavior.Graph
+	content       artifact.Content
+	doc           *javaScriptASTDocument
+	scopes        map[int]string
+	lines         []int
+	values        *javaScriptASTValues
+	valueEvidence map[javaScriptASTValueProof]string
 }
 
 func (state *javaScriptASTExtraction) line(offset int) int {
@@ -339,8 +371,11 @@ func (state *javaScriptASTExtraction) evidence(content artifact.Content, node as
 }
 
 func javaScriptASTLiteralString(expression ast.Expression) string {
-	if literal, ok := expression.(*ast.StringLiteral); ok && len(literal.Value.String()) <= maxJavaScriptCommandValueBytes {
-		return literal.Value.String()
+	if literal, ok := expression.(*ast.StringLiteral); ok && len(literal.Value) <= 2*maxJavaScriptCommandValueBytes+2 {
+		value, valid := javaScriptASTUTF8String(literal.Value)
+		if valid && len(value) <= maxJavaScriptCommandValueBytes {
+			return value
+		}
 	}
 	return ""
 }
@@ -365,15 +400,21 @@ func javaScriptASTProcessArity(method string, count int) bool {
 	return false
 }
 
-func (state *javaScriptASTExtraction) process(content artifact.Content, call *ast.CallExpression, span javaScriptASTSpan, method, binding string, proof []string) {
-	// The existing command recognizer is used only with literal arguments. AST
-	// identifiers are not fed into an independently reconstructed value scope.
+func (state *javaScriptASTExtraction) process(content artifact.Content, call *ast.CallExpression, scope int, span javaScriptASTSpan, method, binding string, proof []string) {
+	// Only complete proved strings/arrays enter the existing command grammar.
+	// Unknown expressions and selection-changing options remain unresolved.
 	commandState := newJavaScriptCommandState(javaScriptCommandPrescan{})
 	start, end := int(call.LeftParenthesis)-state.doc.program.File.Base()+1, int(call.RightParenthesis)-state.doc.program.File.Base()
 	if start < span.start || end < start || end > span.end {
 		return
 	}
-	invocation, _, exact := commandState.resolveInvocation(strings.ToLower(method), state.doc.source[start:end], "")
+	arguments := state.doc.source[start:end]
+	if resolved, causal, ok := state.invocationArguments(call, scope, span.start); ok {
+		if merged, retained := mergeJavaScriptASTValueEvidence(proof, causal); retained {
+			arguments, proof = resolved, merged
+		}
+	}
+	invocation, _, exact := commandState.resolveInvocation(strings.ToLower(method), arguments, "")
 	if exact && !invocation.processAttempt {
 		commandContent := content
 		commandContent.SupportingEvidenceIDs = append(append([]string(nil), content.SupportingEvidenceIDs...), proof...)
@@ -385,8 +426,11 @@ func (state *javaScriptASTExtraction) process(content artifact.Content, call *as
 		}
 		if !state.graph.CorroborateRange(before, proof) {
 			addPartialCoverageOnce(state.graph, content.NodeID, javaScriptASTAnalysisArea, "causal command evidence exceeded retained bounds; affected derived facts were weakened or discarded")
+			return
 		}
-		return
+		if len(state.graph.Operations) > before.OperationStart {
+			return
+		}
 	}
 	qualifiers := map[string]string{"api": "child_process." + method, "api_identity": "stable-javascript-binding-and-exact-call", "module_binding": binding, "argument_coverage": "unresolved", "unresolved_arguments": "dynamic or unsupported argv", "unresolved_executable": "dynamic or unsupported expression"}
 	for key, value := range invocation.qualifiers {
@@ -394,21 +438,39 @@ func (state *javaScriptASTExtraction) process(content artifact.Content, call *as
 	}
 	// A literal argument remains useful even when options prevent proving
 	// executable selection. It is not an executable resource or shell action.
-	if literal := javaScriptASTLiteralString(call.ArgumentList[0]); literal != "" {
+	if literal, causal, known := state.stringValue(call.ArgumentList[0], scope, span.start); known && literal != "" {
 		key := "executable_argument"
 		if method == "exec" || method == "execSync" {
 			key = "command_argument"
 		}
-		qualifiers[key] = literal
+		if merged, retained := mergeJavaScriptASTValueEvidence(proof, causal); retained {
+			qualifiers[key], proof = literal, merged
+		}
 	}
 	executable := invocation.executableOnly
 	if executable != "" {
 		qualifiers["argument_coverage"] = "executable-only"
 		delete(qualifiers, "unresolved_executable")
 	}
+	bindings := behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, executable)))
+	if exact && !invocation.processAttempt {
+		// A closed command outside the shell vocabulary still proves the
+		// process API request. Preserve it without inventing PATH resolution
+		// or an operation for the unrecognized command's downstream behavior.
+		value := invocation.shellCommand
+		qualifiers["argument_coverage"], qualifiers["argument_encoding"] = "exact-command", "shell-command"
+		if value == "" {
+			encoded, _ := json.Marshal(invocation.argv[1:])
+			value = string(encoded)
+			qualifiers["argument_coverage"], qualifiers["argument_encoding"] = "exact-argv", "json-array"
+		}
+		delete(qualifiers, "unresolved_arguments")
+		qualifiers["unresolved_executable"] = "runtime command resolution"
+		bindings = append(bindings, behavior.Bind(behavior.ResourceRoleArguments, behavior.NewResource(behavior.ResourceCommand, value), proof...))
+	}
 	state.graph.AddOperation(behavior.ModeledOperation{
 		SubjectNodeID: content.NodeID, ScopeID: content.ScopeID, SourceFunction: content.Function,
-		Kind: behavior.OperationProcessExecute, ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, executable))),
+		Kind: behavior.OperationProcessExecute, ResourceBindings: bindings,
 		Qualifiers: qualifiers, EvidenceIDs: proof, Support: behavior.SupportCorroborated,
 		Execution: executionContextForContent(content), Line: state.line(span.start),
 	})
