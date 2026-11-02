@@ -84,6 +84,16 @@ func TestArgumentAndWorkLimits(t *testing.T) {
 	if r := Parse(append([]string{"fixture.scpt"}, args...)); r.Disposition != Recognized || !r.Executes() {
 		t.Fatal("script arguments were parsed as interpreter options")
 	}
+	for i := range args {
+		args[i] = "-sh"
+	}
+	if r := Parse(args); r.Disposition != Recognized || r.AcceptsAppendedProgram {
+		t.Fatal("a full prefix budget left room for an appended program")
+	}
+	args[len(args)-1] = "--"
+	if r := Parse(args); r.Disposition != Recognized || r.AcceptsAppendedProgram {
+		t.Fatal("an option delimiter escaped the appended-program budget")
+	}
 	large := strings.Repeat("h", MaxProgramBytes/2)
 	for _, argv := range [][]string{{"-e", large, "-e", large}, {"-s", large, "-s", large}, {"--", large + large}} {
 		if r := Parse(argv); r.Disposition != Limited || r.Executes() || len(r.Lines) != 0 {

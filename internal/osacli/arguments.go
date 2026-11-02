@@ -79,6 +79,7 @@ func Parse(args []string) Result {
 		}
 		if arg == "--" {
 			if i+1 == len(args) {
+				r.AcceptsAppendedProgram = r.AcceptsAppendedProgram && i+1 < MaxArguments && inspectedBytes < MaxProgramBytes
 				return r
 			}
 			if i+1 >= MaxArguments {
@@ -157,5 +158,6 @@ func Parse(args []string) Result {
 			}
 		}
 	}
+	r.AcceptsAppendedProgram = r.AcceptsAppendedProgram && len(args) < MaxArguments && inspectedBytes < MaxProgramBytes
 	return r
 }
