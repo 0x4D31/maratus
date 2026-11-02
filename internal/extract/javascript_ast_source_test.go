@@ -39,6 +39,65 @@ func TestJavaScriptASTSourceSharedSemanticsAndEvidence(t *testing.T) {
 	}
 }
 
+func TestJavaScriptASTSourceRecoversLeadingIsolatedIIFE(t *testing.T) {
+	source := "\n;\n(function(){var cp=require(\"child_process\");cp.execSync(\"/usr/bin/id\");})();\n" +
+		`const later=require("child_process");capture(later);`
+	var graph behavior.Graph
+	content := artifact.Content{NodeID: "node-js", LogicalPath: "fixture.js", SemanticLanguage: "javascript", ByteOffsetBase: 100}
+	extractJavaScriptASTSource(&graph, content, source)
+	if len(graph.Operations) != 2 {
+		t.Fatalf("leading IIFE operations were lost or duplicated: %#v", graph.Operations)
+	}
+	var operation *behavior.ModeledOperation
+	for index := range graph.Operations {
+		if graph.Operations[index].Kind == behavior.OperationProcessExecute {
+			operation = &graph.Operations[index]
+		}
+	}
+	if operation == nil {
+		t.Fatalf("leading IIFE process operation was lost: %#v", graph.Operations)
+	}
+	if operation.Line != 3 {
+		t.Fatalf("leading IIFE location or API identity is wrong: %#v", operation)
+	}
+	callEvidence := false
+	for _, id := range operation.EvidenceIDs {
+		var evidence *behavior.Evidence
+		for index := range graph.Evidence {
+			if graph.Evidence[index].ID == id {
+				evidence = &graph.Evidence[index]
+				break
+			}
+		}
+		if evidence == nil || !evidence.ByteOffsetKnown() || evidence.Offset < content.ByteOffsetBase {
+			t.Fatalf("missing subregion evidence origin: %#v", evidence)
+		}
+		relative := evidence.Offset - content.ByteOffsetBase
+		if relative >= int64(len(source)) || !strings.HasPrefix(source[relative:], evidence.Value) {
+			t.Fatalf("subregion evidence does not map to original bytes: %#v", evidence)
+		}
+		if evidence.Kind == "javascript-api-call" && evidence.Value == `cp.execSync("/usr/bin/id")` {
+			callEvidence = true
+		}
+	}
+	if !callEvidence {
+		t.Fatal("leading IIFE process lost its exact API-call evidence")
+	}
+}
+
+func TestJavaScriptASTSourceLeadingIIFERequiresIsolatedIdentity(t *testing.T) {
+	for _, source := range []string{
+		`;(function(){var cp=require("child_process");capture(cp);cp.execSync("/usr/bin/id");})();const later=require("child_process");capture(later);`,
+		`const earlier=require("child_process");capture(earlier);(function(){var cp=require("child_process");cp.execSync("/usr/bin/id");})();`,
+		`;(function(cp){cp.execSync("/usr/bin/id");})(require("child_process"));`,
+		`;(function(){var cp=require("child_process"),padding="` + strings.Repeat("x", maxJavaScriptLeadingIIFEBytes) + `";cp.execSync("/usr/bin/id");})();const later=require("child_process");capture(later);`,
+	} {
+		if graph := javaScriptASTExtract(source); len(graph.Operations) != 0 {
+			t.Fatalf("open, non-leading, parameterized, or oversized IIFE produced operations: %#v", graph.Operations)
+		}
+	}
+}
+
 func TestJavaScriptASTSourceFailsClosedForIdentityAndSyntax(t *testing.T) {
 	for _, source := range []string{
 		`function run(require){const cp=require("child_process");cp.exec(command);}`,

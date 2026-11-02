@@ -3,6 +3,7 @@ package extract
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -12,6 +13,8 @@ import (
 )
 
 const javaScriptASTAnalysisArea = "javascript-ast-analysis"
+
+const maxJavaScriptLeadingIIFEBytes = 64 << 10
 
 func requiresJavaScriptASTFrontend(prescan javaScriptCommandPrescan) bool {
 	if prescan.index.Disposition == javaScriptStructuralLimited || prescan.index.Disposition == javaScriptStructuralMalformed {
@@ -46,6 +49,11 @@ func requiresJavaScriptASTFrontend(prescan javaScriptCommandPrescan) bool {
 // Only stable CommonJS namespace calls enter the shared operation vocabulary.
 // No JavaScript runtime, module resolution, or second rule evaluator is used.
 func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content, source string) {
+	extractJavaScriptASTSourceAt(graph, content, source, 0, true)
+}
+
+func extractJavaScriptASTSourceAt(graph *behavior.Graph, content artifact.Content, source string, lineBase int, allowLeadingIIFE bool) {
+	operationStart := len(graph.Operations)
 	doc, err := parseJavaScriptAST(source, false)
 	if err != nil {
 		doc, err = parseJavaScriptAST(source, true)
@@ -59,7 +67,7 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 		addPartialCoverageOnce(graph, content.NodeID, javaScriptASTAnalysisArea, err.Error()+"; source semantics were not inferred")
 		return
 	}
-	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: javaScriptASTLineOffsets(source)}
+	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: javaScriptASTLineOffsets(source), lineBase: lineBase}
 	state.values = newJavaScriptASTValues(bindings)
 	addPartialCoverageOnce(graph, content.NodeID, javaScriptASTAnalysisArea,
 		"AST frontend retained bounded CommonJS namespace calls; named imports, destructured aliases, interop wrappers, helper argument propagation, control-flow feasibility and a complete call graph are not modeled; unresolved resources remain unknown")
@@ -210,6 +218,54 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 		}
 	}
 	state.valueCoverage()
+	if !allowLeadingIIFE || len(graph.Operations) != operationStart {
+		return
+	}
+	start, end, ok := javaScriptLeadingIIFERegion(doc)
+	if !ok || content.ByteOffsetBase < 0 || int64(end) > math.MaxInt64-content.ByteOffsetBase {
+		return
+	}
+	regionContent := content
+	regionContent.ByteOffsetBase += int64(start)
+	regionLineBase := state.line(start) - 1
+	extractJavaScriptASTSourceAt(graph, regionContent, source[start:end], regionLineBase, false)
+}
+
+// A leading zero-argument IIFE is a bounded lexical region whose namespace
+// bindings are local to the wrapper. When whole-file alias invalidation would
+// otherwise discard every operation, analyze that region under the same
+// per-content identity boundary used for separately retained modules. This does
+// not establish scheduling or execution; emitted operations keep their normal
+// static connectivity. Restricting the fallback to the first executable
+// statement avoids splitting arbitrary functions or later program regions.
+func javaScriptLeadingIIFERegion(doc *javaScriptASTDocument) (int, int, bool) {
+	for _, statement := range doc.program.Body {
+		expression, ok := statement.(*ast.ExpressionStatement)
+		if !ok {
+			if _, empty := statement.(*ast.EmptyStatement); empty {
+				continue
+			}
+			return 0, 0, false
+		}
+		if _, directive := expression.Expression.(*ast.StringLiteral); directive {
+			continue
+		}
+		call, ok := expression.Expression.(*ast.CallExpression)
+		if !ok || len(call.ArgumentList) != 0 {
+			return 0, 0, false
+		}
+		switch call.Callee.(type) {
+		case *ast.FunctionLiteral, *ast.ArrowFunctionLiteral:
+		default:
+			return 0, 0, false
+		}
+		start, end, known := javaScriptASTSourceSpan(statement, doc.program.File.Base(), len(doc.source))
+		if !known || start == 0 || doc.source[start-1] != '(' || end-start+1 > maxJavaScriptLeadingIIFEBytes {
+			return 0, 0, false
+		}
+		return start - 1, end, true
+	}
+	return 0, 0, false
 }
 
 func (bindings *javaScriptASTBindings) builtinFetchSafe() bool {
@@ -288,12 +344,28 @@ type javaScriptASTExtraction struct {
 	doc           *javaScriptASTDocument
 	scopes        map[int]string
 	lines         []int
+	lineBase      int
 	values        *javaScriptASTValues
 	valueEvidence map[javaScriptASTValueProof]string
 }
 
 func (state *javaScriptASTExtraction) line(offset int) int {
-	return sort.Search(len(state.lines), func(i int) bool { return state.lines[i] > offset })
+	return state.lineBase + sort.Search(len(state.lines), func(i int) bool { return state.lines[i] > offset })
+}
+
+func (state *javaScriptASTExtraction) absoluteOffset(offset int) int64 {
+	return state.content.ByteOffsetBase + int64(offset)
+}
+
+func (state *javaScriptASTExtraction) functionName(scope int) string {
+	lexical := state.doc.scopes[scope]
+	if lexical.kind != "function" {
+		return ""
+	}
+	if !strings.HasPrefix(lexical.function, "function@") {
+		return lexical.function
+	}
+	return fmt.Sprintf("function@%d", state.absoluteOffset(lexical.span.start))
 }
 
 func javaScriptASTLineOffsets(source string) []int {
@@ -344,11 +416,8 @@ func (state *javaScriptASTExtraction) scopeContent(scope int) (artifact.Content,
 			}
 			parentID = parent.ScopeID
 		}
-		kind, name := lexical.kind, fmt.Sprintf("%s@%d", lexical.kind, lexical.span.start)
-		function := ""
-		if kind == "function" {
-			function = lexical.function
-		}
+		kind, name := lexical.kind, fmt.Sprintf("%s@%d", lexical.kind, state.absoluteOffset(lexical.span.start))
+		function := state.functionName(scope)
 		state.scopes[scope] = state.graph.AddScope(behavior.Scope{
 			NodeID: content.NodeID, ParentID: parentID, Kind: kind, Name: name, Function: function,
 			LineStart: state.line(lexical.span.start), LineEnd: state.line(lexical.span.end), SourceRole: content.Role,
@@ -361,9 +430,7 @@ func (state *javaScriptASTExtraction) scopeContent(scope int) (artifact.Content,
 		content.ExecutionRootIDs = nil
 		content.InvokedTargetIDs = nil
 	}
-	if state.doc.scopes[scope].kind == "function" {
-		content.Function = lexical.function
-	}
+	content.Function = state.functionName(scope)
 	return content, content.ScopeID != ""
 }
 
@@ -374,7 +441,7 @@ func (state *javaScriptASTExtraction) evidence(content artifact.Content, node as
 	}
 	return state.graph.AddEvidence(behavior.Evidence{
 		NodeID: content.NodeID, ScopeID: content.ScopeID, Logical: content.LogicalPath, Physical: content.PhysicalPath,
-		Function: content.Function, Line: state.line(start), Offset: int64(start), OffsetKnown: true,
+		Function: content.Function, Line: state.line(start), Offset: state.absoluteOffset(start), OffsetKnown: true,
 		Method: "javascript-ast", Kind: kind, Value: compactTextEvidenceValue(state.doc.source[start:end]),
 	})
 }
