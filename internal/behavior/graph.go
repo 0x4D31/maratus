@@ -46,6 +46,7 @@ type Graph struct {
 	nextRelation              int
 	nextNetworkImplementation int
 	nextSourceOrderGroup      int
+	nextDirectoryContext      int
 	EvidenceLimit             int
 	EvidenceLimitDrops        int
 	EvidenceStringDrops       int
@@ -268,6 +269,7 @@ func (g *Graph) AddAnalysisSelection(selection AnalysisSelection) bool {
 func (g *Graph) AddOperation(operation ModeledOperation) string {
 	if !ValidOperationKind(operation.Kind) || onlyEmptyStrings(operation.EvidenceIDs) ||
 		operation.SourceOrderGroup < 0 || operation.SourceOrdinal < 0 ||
+		operation.WorkingDirectoryContext < 0 || operation.HomeDirectoryContext < 0 ||
 		(operation.SourceOrderGroup == 0) != (operation.SourceOrdinal == 0) ||
 		operation.SourceFunction != "" && operation.ScopeID == "" {
 		g.rejectItem()
@@ -331,6 +333,11 @@ func (g *Graph) AddOperation(operation ModeledOperation) string {
 func (g *Graph) NewSourceOrderGroup() int {
 	g.nextSourceOrderGroup++
 	return g.nextSourceOrderGroup
+}
+
+func (g *Graph) NewDirectoryContext() int {
+	g.nextDirectoryContext++
+	return g.nextDirectoryContext
 }
 
 func (g *Graph) AddRelation(relation OperationRelation) string {
@@ -848,6 +855,7 @@ func (g *Graph) ValidateOperations() error {
 			return fmt.Errorf("operations[%d].kind has invalid value %q", i, operation.Kind)
 		}
 		if operation.SourceOrderGroup < 0 || operation.SourceOrdinal < 0 ||
+			operation.WorkingDirectoryContext < 0 || operation.HomeDirectoryContext < 0 ||
 			(operation.SourceOrderGroup == 0) != (operation.SourceOrdinal == 0) {
 			return fmt.Errorf("operations[%d] has invalid transient source order %d/%d", i, operation.SourceOrderGroup, operation.SourceOrdinal)
 		}

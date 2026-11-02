@@ -26,6 +26,7 @@ type shellVariableKey struct{ scope, name string }
 
 type textVariableState struct {
 	shellOrigins     map[shellVariableKey]string
+	shellDirectories map[string]shellDirectoryContext
 	usedShellOrigins []string
 	globals          map[string]string
 	locals           map[string]map[string]string

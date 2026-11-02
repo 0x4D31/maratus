@@ -22,12 +22,27 @@ type ModeledOperation struct {
 	SourceOrderGroup     int  `json:"-"`
 	SourceOrdinal        int  `json:"-"`
 	SourceOrderUncertain bool `json:"-"`
+	// Directory contexts are transient parser proofs, not execution roots or
+	// resolved host paths. Only equal nonzero contexts permit relative joins.
+	WorkingDirectoryContext int `json:"-"`
+	HomeDirectoryContext    int `json:"-"`
 }
+
+type FilePathInterpretation uint8
+
+const (
+	FilePathUnknown FilePathInterpretation = iota
+	FilePathLiteral
+	FilePathHomeRelative
+)
 
 type ResourceBinding struct {
 	Role        ResourceRole `json:"role"`
 	Resource    Resource     `json:"resource"`
 	EvidenceIDs []string     `json:"evidence_ids,omitempty"`
+	// FilePathInterpretation retains quote/expansion provenance until relation
+	// derivation. The resulting evidenced relation is the serialized proof.
+	FilePathInterpretation FilePathInterpretation `json:"-"`
 }
 
 type Feature struct {

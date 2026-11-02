@@ -505,17 +505,17 @@ func TestLinkOperationRelationsNormalizesSimpleRelativePathsInSharedEntrypoint(t
 	graph.AddOperation(behavior.ModeledOperation{
 		SubjectNodeID: "node-script",
 		Kind:          "network.download", ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleLocalOutput, behavior.Resource{Kind: behavior.ResourceFile, Value: "./payload"}), behavior.Bind(behavior.ResourceRoleRemoteSource, behavior.NewResource(behavior.ResourceURL, ""))), ScopeID: "scope-script", Execution: testConnectedExecution("root-script"),
-		Line: 1,
+		Line: 1, WorkingDirectoryContext: 1,
 	})
 	graph.AddOperation(behavior.ModeledOperation{
 		SubjectNodeID: "node-script",
 		Kind:          "file.make-executable", ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleTarget, behavior.Resource{Kind: behavior.ResourceFile, Value: "payload"})), ScopeID: "scope-script", Execution: testConnectedExecution("root-script"),
-		Line: 2,
+		Line: 2, WorkingDirectoryContext: 1,
 	})
 	graph.AddOperation(behavior.ModeledOperation{
 		SubjectNodeID: "node-script",
 		Kind:          "process.execute", ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.Resource{Kind: behavior.ResourceFile, Value: "./payload"})), ScopeID: "scope-script", Execution: testConnectedExecution("root-script"),
-		Line: 3,
+		Line: 3, WorkingDirectoryContext: 1,
 	})
 
 	linkTestOperationRelations(&graph)
