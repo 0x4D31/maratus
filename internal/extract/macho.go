@@ -4377,7 +4377,7 @@ type machoCallContext struct {
 	StringArguments  [6]machoCallStringArgument
 	ObjCStringArrays [6]machoObjCStringArray
 	ObjCReceiver     machoObjCReceiverValue
-	ArgumentVector   []machoStaticArgument
+	ArgumentVector   *machoStaticArgv
 	SocketAddress    machoStaticSocketAddress
 }
 
@@ -5150,6 +5150,10 @@ func readExactStringAtPointerLocationIndexed(index *machoSectionIndex, pointer, 
 }
 
 func readCStringAtVAIndexed(index *machoSectionIndex, va, maxLen uint64) (string, bool) {
+	return readMachOCStringAtVAIndexed(index, va, maxLen, false)
+}
+
+func readMachOCStringAtVAIndexed(index *machoSectionIndex, va, maxLen uint64, allowEmpty bool) (string, bool) {
 	if maxLen == 0 || maxLen > maxMachOASCIIStringBytes {
 		maxLen = maxMachOASCIIStringBytes
 	}
@@ -5164,13 +5168,14 @@ func readCStringAtVAIndexed(index *machoSectionIndex, va, maxLen uint64) (string
 	if err != nil || len(window) == 0 {
 		return "", false
 	}
-	if bytes.IndexByte(window, 0) < 0 && uint64(len(window)) < remaining {
-		// The string exceeds the analysis limit. The bounded whole-image
-		// string pass records partial coverage and may still retain its prefix.
+	end := bytes.IndexByte(window, 0)
+	if end < 0 {
+		// A section boundary does not prove a C-string terminator. Raw string
+		// observations may retain these bytes, but exact call operands may not.
 		return "", false
 	}
-	value := cstring(window)
-	if value == "" || !mostlyPrintableASCII(value) {
+	value := string(window[:end])
+	if value == "" && !allowEmpty || value != "" && !mostlyPrintableASCII(value) {
 		return "", false
 	}
 	return value, true
@@ -7296,8 +7301,9 @@ func addOperationFromCalledImportedSymbolWithContextIndexed(lookup *machoCallLoo
 		operation.ResourceBindings = requiredResourceBindings(operation.Kind, resource)
 	}
 	if operation.Kind == behavior.OperationProcessExecute {
-		bindMachOStaticArgv(lookup, &operation, context.ArgumentVector)
-		applyMachOLocalAgentInvocation(&operation, context.ArgumentVector)
+		if bindMachOStaticArgv(lookup, &operation, context.ArgumentVector) {
+			applyMachOLocalAgentInvocation(&operation, context.ArgumentVector.Arguments)
+		}
 	}
 	operationID := lookup.addOperation(operation)
 	if isNativeShellExecutionSymbol(plain) {
