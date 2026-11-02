@@ -60,6 +60,7 @@ func maskAppleScriptComments(lines []string) []string {
 		} else {
 			out[n] = string(masked)
 		}
+		escaped = false // a physical newline cannot escape the next line's quote
 	}
 	return out
 }

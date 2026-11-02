@@ -28,6 +28,23 @@ func TestBoundedTextCapsNewlineDenseInput(t *testing.T) {
 	}
 }
 
+func TestBoundedAppleScriptTextPreservesBytesAndPhysicalLines(t *testing.T) {
+	for _, separator := range []string{"\n", "\r", "\r\n"} {
+		source := "first" + separator + "second" + separator
+		input := boundedAppleScriptText([]byte(source))
+		if input.Source != source || strings.Join(input.Lines, "|") != "first|second|" || input.truncated() {
+			t.Fatalf("separator %q: %#v", separator, input)
+		}
+		input = boundedAppleScriptText(bytes.Repeat([]byte(separator), maxTextAnalysisLines+1))
+		if len(input.Lines) != maxTextAnalysisLines || !input.LinesTruncated {
+			t.Fatalf("separator %q escaped the line budget", separator)
+		}
+	}
+	if input := boundedText([]byte("first\rsecond")); len(input.Lines) != 1 {
+		t.Fatal("AppleScript line conventions changed another adapter")
+	}
+}
+
 func TestBoundedTextCapsBytesAndLongLinesWithCoverage(t *testing.T) {
 	data := bytes.Repeat([]byte{'x'}, maxTextAnalysisBytes+1)
 	input := boundedText(data)

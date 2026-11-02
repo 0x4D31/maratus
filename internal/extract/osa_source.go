@@ -43,10 +43,6 @@ func extractAppleScriptSource(graph *behavior.Graph, content artifact.Content, l
 		if line == "" {
 			continue
 		}
-		if osaUnquotedCR(line) {
-			addPartialCoverageOnce(graph, content.NodeID, "applescript-statement-analysis", "embedded CR statement boundaries were outside the bounded LF/CRLF source profile; remaining contexts were not inferred")
-			break
-		}
 		lower := osaHeaderText(line)
 		for _, active := range stack {
 			graph.Scopes[active.scopeIndex].LineEnd = n + 1
@@ -161,27 +157,6 @@ func extractAppleScriptSource(graph *behavior.Graph, content artifact.Content, l
 		}
 	}
 	addTextDerivedCoverageOnce(graph, content, budget)
-}
-
-func osaUnquotedCR(line string) bool {
-	quoted, escaped := false, false
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if quoted {
-			if escaped {
-				escaped = false
-			} else if c == '\\' {
-				escaped = true
-			} else if c == '"' {
-				quoted = false
-			}
-		} else if c == '"' {
-			quoted = true
-		} else if c == '\r' {
-			return true
-		}
-	}
-	return false
 }
 
 // Normalization is confined to the header-match view. Operands and source

@@ -30,6 +30,14 @@ type boundedTextInput struct {
 }
 
 func boundedText(data []byte) boundedTextInput {
+	return boundedTextLineBreaks(data, false)
+}
+
+func boundedAppleScriptText(data []byte) boundedTextInput {
+	return boundedTextLineBreaks(data, true)
+}
+
+func boundedTextLineBreaks(data []byte, appleScriptLines bool) boundedTextInput {
 	end := len(data)
 	input := boundedTextInput{}
 	if end > maxTextAnalysisBytes {
@@ -45,6 +53,9 @@ func boundedText(data []byte) boundedTextInput {
 			break
 		}
 		relativeEnd := strings.IndexByte(input.Source[start:], '\n')
+		if appleScriptLines {
+			relativeEnd = strings.IndexAny(input.Source[start:], "\r\n")
+		}
 		lineEnd := len(input.Source)
 		if relativeEnd >= 0 {
 			lineEnd = start + relativeEnd
@@ -59,6 +70,9 @@ func boundedText(data []byte) boundedTextInput {
 			break
 		}
 		start = lineEnd + 1
+		if appleScriptLines && input.Source[lineEnd] == '\r' && start < len(input.Source) && input.Source[start] == '\n' {
+			start++
+		}
 	}
 	return input
 }

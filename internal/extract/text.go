@@ -130,7 +130,12 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			"Rust source receives bounded literal, API-name, function-name, and direct-call pattern analysis only; no Rust AST, macro expansion, type resolution, complete call graph, data flow, or control-flow reconstruction",
 		)
 	}
-	input := boundedText(content.Data)
+	var input boundedTextInput
+	if language == "applescript" {
+		input = boundedAppleScriptText(content.Data)
+	} else {
+		input = boundedText(content.Data)
+	}
 	addBoundedTextCoverage(graph, content, "text-analysis", input)
 	lines := input.Lines
 	if (language == "applescript" || language == "jxa") && input.truncated() {

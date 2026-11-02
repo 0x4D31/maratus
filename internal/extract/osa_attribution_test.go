@@ -285,22 +285,47 @@ func TestOSAHeaderWhitespacePreservesContexts(t *testing.T) {
 	}
 }
 
-func TestOSAEmbeddedStatementBoundariesDoNotMergeHeaders(t *testing.T) {
-	var graph behavior.Graph
-	source := "on collect()\rdo shell script \"printf dormant\"\rend collect\ndo shell script \"printf top\""
-	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
-	if len(graph.Operations) != 0 {
-		t.Fatal("unparsed CR statements were merged into a handler header")
+func TestOSAStatementLineEndingsPreserveScopes(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n", "\r"} {
+		var graph behavior.Graph
+		source := strings.Join([]string{"-- comment \"", "on collect()", `do shell script "printf dormant"`, "end collect", `do shell script "printf top"`}, newline)
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+		found, foundTop := false, false
+		for _, op := range graph.Operations {
+			if op.Line == 3 {
+				found = true
+				if op.SourceFunction != "collect" {
+					t.Fatalf("%q line ending lost the handler context: %#v", newline, op)
+				}
+			}
+			if op.Line == 5 {
+				foundTop = true
+				if op.SourceFunction != "" {
+					t.Fatal("a top-level statement inherited the handler")
+				}
+			}
+		}
+		if !found || !foundTop {
+			t.Fatalf("%q line ending erased supported statements: handler=%v top=%v", newline, found, foundTop)
+		}
 	}
-	var literal behavior.Graph
-	source = "set note to \"one\rtwo\"\ndo shell script \"printf top\""
-	ExtractText(&literal, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
-	found := false
-	for _, op := range literal.Operations {
-		found = found || op.Kind == behavior.OperationInterpreterInvoke && op.Line == 2
-	}
-	if !found {
-		t.Fatal("a CR inside string data erased the following supported statement")
+}
+
+func TestOSAMultilineStringCannotSupplyAStatement(t *testing.T) {
+	for _, newline := range []string{"\n", "\r", "\r\n"} {
+		var graph behavior.Graph
+		source := strings.Join([]string{`set note to "first`, `do shell script \"printf decoy\"`, `last"`, `do shell script "printf top"`}, newline)
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+		found := false
+		for _, op := range graph.Operations {
+			if op.Line != 4 {
+				t.Fatalf("%q string data supplied an operation: %#v", newline, op)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("%q multiline string erased the following statement", newline)
+		}
 	}
 }
 
