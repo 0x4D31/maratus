@@ -137,9 +137,13 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		addPartialCoverageOnce(graph, content.NodeID, "osa-source-completeness", "truncated source cannot establish complete statement contexts or stable host receivers; OSA source semantics were not inferred")
 		return
 	}
+	if (language == "applescript" || language == "jxa") && strings.ContainsRune(input.Source, 0) {
+		addPartialCoverageOnce(graph, content.NodeID, "osa-source-encoding", "NUL-containing OSA source encoding is unsupported; source semantics were not inferred")
+		return
+	}
 	if language == "applescript" {
 		lines = maskAppleScriptComments(lines)
-		extractAppleScriptSource(graph, content, lines)
+		extractAppleScriptSource(graph, content, lines, !utf8.ValidString(input.Source))
 	}
 	if language == "jxa" {
 		extractJXAShellCalls(graph, content, input.Source)
@@ -2991,10 +2995,20 @@ func downloadPath(value string) bool {
 	return strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~/")
 }
 
-func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Content, line string, lineNo int, execution behavior.ExecutionContext, evidenceID string, budget *textLineBudget) {
+func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Content, line string, lineNo int, execution behavior.ExecutionContext, evidenceID string, budget *textLineBudget, bindings *osaStringBindings) bool {
 	line = appleScriptCommandStatement(line)
+	start := graph.CaptureGraphRange()
+	var requiredEvidence []string
+	closedRequest := false
+	defer func() {
+		if len(requiredEvidence) > 0 {
+			graph.CorroborateRange(start, requiredEvidence)
+		}
+	}()
 	if argument, ok := appleScriptCommandArgument(line, "open location"); ok {
-		if value, exact := exactAppleScriptStringExpression(argument); exact {
+		if value, proofs, exact := resolveAppleScriptStringExpression(argument, bindings); exact {
+			closedRequest = true
+			requiredEvidence = proofs
 			if dest := delegatedURLDestinationsBudget(value, budget); len(dest) > 0 {
 				addDelegatedNetworkOperation(graph, content, "AppleScript open location", dest, lineNo, execution, evidenceID)
 			}
@@ -3013,16 +3027,21 @@ func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Conten
 		})
 	}
 	if argument, ok := appleScriptCommandArgument(line, "do shell script"); ok {
-		command, exact := exactAppleScriptStringExpression(argument)
+		command, proofs, exact := resolveAppleScriptStringExpression(argument, bindings)
+		if exact {
+			requiredEvidence = proofs
+			closedRequest = true
+		}
 		if !exact {
 			command = ""
 			addPartialCoverageOnce(graph, content.NodeID, "osa-command-arguments", "a shell invocation had an unresolved complete argument expression; no command was synthesized from literal fragments")
 			if !boundedAppleScriptArgumentShape(argument) {
-				return
+				return false
 			}
 		}
 		addOSAShellInvocation(graph, content, command, lineNo, execution, evidenceID)
 	}
+	return closedRequest
 }
 
 func addOSAShellInvocation(graph *behavior.Graph, content artifact.Content, command string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {

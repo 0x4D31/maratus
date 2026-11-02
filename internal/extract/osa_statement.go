@@ -70,11 +70,11 @@ func maskAppleScriptComments(lines []string) []string {
 func appleScriptCommandStatement(line string) string {
 	line = strings.TrimSpace(line)
 	p := osaLiteralExpression{source: line}
-	if p.word("return") {
-		return strings.TrimSpace(line[p.pos:])
+	if p.word("return") || p.word("get") {
+		return unwrapOSACommandExpression(strings.TrimSpace(line[p.pos:]))
 	}
 	if !p.word("set") {
-		return line
+		return unwrapOSACommandExpression(line)
 	}
 	p.space()
 	start := p.pos
@@ -84,7 +84,60 @@ func appleScriptCommandStatement(line string) string {
 	if p.pos == start || (line[start] >= '0' && line[start] <= '9') || !p.word("to") {
 		return ""
 	}
-	return strings.TrimSpace(line[p.pos:])
+	return unwrapOSACommandExpression(strings.TrimSpace(line[p.pos:]))
+}
+
+func unwrapOSACommandExpression(line string) string {
+	for depth := 0; depth < maxOSAExpressionDepth; depth++ {
+		p := osaLiteralExpression{source: line}
+		if p.word("text") && p.word("returned") && p.word("of") {
+			line = strings.TrimSpace(line[p.pos:])
+			if !strings.HasPrefix(line, "(") {
+				return ""
+			}
+		}
+		if !strings.HasPrefix(line, "(") {
+			return line
+		}
+		if len(line) > maxOSAExpressionBytes || !osaWholeParenthesizedExpression(line) {
+			return ""
+		}
+		line = strings.TrimSpace(line[1 : len(line)-1])
+	}
+	return ""
+}
+
+func osaWholeParenthesizedExpression(source string) bool {
+	depth := 0
+	quoted, escaped := false, false
+	for i := 0; i < len(source); i++ {
+		c := source[i]
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			quoted = true
+		case '(':
+			depth++
+			if depth > maxOSAExpressionDepth {
+				return false
+			}
+		case ')':
+			depth--
+			if depth == 0 {
+				return i == len(source)-1
+			}
+		}
+	}
+	return false
 }
 
 func appleScriptCommandArgument(line, command string) (string, bool) {
@@ -219,6 +272,31 @@ func osaDialogValue(p *osaLiteralExpression, depth int) bool {
 		switch strings.ToLower(p.source[start:p.pos]) {
 		case "default", "cancel", "with", "without", "hidden", "buttons", "giving":
 			return false
+		}
+		p.space()
+		if p.pos < len(p.source) && p.source[p.pos] == '(' {
+			p.pos++
+			p.space()
+			if p.pos >= len(p.source) {
+				return false
+			}
+			if p.source[p.pos] != ')' {
+				if !osaDialogValue(p, depth+1) {
+					return false
+				}
+				p.space()
+				for p.pos < len(p.source) && p.source[p.pos] == ',' {
+					p.pos++
+					if !osaDialogValue(p, depth+1) {
+						return false
+					}
+					p.space()
+				}
+			}
+			if p.pos >= len(p.source) || p.source[p.pos] != ')' {
+				return false
+			}
+			p.pos++
 		}
 	}
 	p.space()

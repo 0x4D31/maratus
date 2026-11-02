@@ -233,6 +233,31 @@ func TestOSAMaskedDialogParameters(t *testing.T) {
 	}
 }
 
+func TestOSANestedDialogExpressions(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		want   bool
+	}{
+		{`set answer to text returned of (display dialog (labelForUser(message)) with title titleForUser(name) default answer "" buttons {"OK"} with hidden answer)`, true},
+		{`return text returned of (display dialog "Input" default answer "" with hidden answer)`, true},
+		{`get text returned of (display dialog "Input" default answer "" with hidden answer)`, true},
+		{`set answer to "text returned of (display dialog prompt default answer empty with hidden answer)"`, false},
+		{`set answer to text returned of (display dialog "with hidden answer" default answer "")`, false},
+		{`set answer to text returned of (display dialog "Input" default answer "" with hidden answer) & "trailing data"`, false},
+		{`set answer to text returned of (display dialog (labelForUser(message)) default answer "" with hidden answer`, false},
+	} {
+		var graph behavior.Graph
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(test.source)})
+		got := false
+		for _, op := range graph.Operations {
+			got = got || op.Kind == behavior.OperationCredentialPrompt
+		}
+		if got != test.want {
+			t.Fatalf("prompt=%v want=%v: %s", got, test.want, test.source)
+		}
+	}
+}
+
 func TestOSAQuotedCommandDataDoesNotBecomeCommunication(t *testing.T) {
 	var graph behavior.Graph
 	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", MediaType: "text/plain", SemanticLanguage: "applescript", Data: []byte(`do shell script ("printf '%s' " & quoted form of "curl https://example.invalid/decoy")`)})

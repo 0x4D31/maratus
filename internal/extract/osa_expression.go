@@ -12,20 +12,35 @@ const (
 )
 
 // osaLiteralExpression is a closed string transformer. It never evaluates
-// identifiers, handlers, coercions, shell expansions or application objects.
+// handlers, coercions, shell expansions or application objects. Identifiers
+// resolve only through an explicit bounded local immutable-text proof table.
 type osaLiteralExpression struct {
 	source     string
 	pos, terms int
+	bindings   *osaStringBindings
+	proofs     []string
 }
 
 func exactAppleScriptStringExpression(source string) (string, bool) {
+	value, _, exact := resolveAppleScriptStringExpression(source, nil)
+	return value, exact
+}
+
+func resolveAppleScriptStringExpression(source string, bindings *osaStringBindings) (string, []string, bool) {
 	if len(source) > maxOSAExpressionBytes || !utf8.ValidString(source) {
-		return "", false
+		return "", nil, false
 	}
-	p := osaLiteralExpression{source: source}
+	if bindings != nil && bindings.asciiOnly {
+		for i := 0; i < len(source); i++ {
+			if source[i] >= 0x80 {
+				return "", nil, false
+			}
+		}
+	}
+	p := osaLiteralExpression{source: source, bindings: bindings}
 	value, ok := p.expression(0)
 	p.space()
-	return value, ok && p.pos == len(source)
+	return value, p.proofs, ok && p.pos == len(source)
 }
 
 func boundedAppleScriptArgumentShape(source string) bool {
@@ -100,6 +115,17 @@ func (p *osaLiteralExpression) term(depth int) (string, bool) {
 		return value, len(value) <= maxOSAExpressionBytes
 	}
 	if p.source[p.pos] != '"' {
+		if p.bindings != nil {
+			name := osaBindingIdentifier(p)
+			binding, known := p.bindings.lookup(name)
+			if known {
+				p.proofs = mergeEvidenceIDs(append(p.proofs, binding.evidenceIDs...)...)
+				if len(p.proofs) <= maxOSAStringProofs {
+					return binding.value, true
+				}
+				p.bindings.limited = true
+			}
+		}
 		return "", false
 	}
 	p.pos++

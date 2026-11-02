@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -57,6 +58,33 @@ func TestInspectOSADataDoesNotAcquireCapabilities(t *testing.T) {
 		}
 		if err := WriteJSON(&c, reloaded); err != nil || !bytes.Equal(a.Bytes(), c.Bytes()) {
 			t.Fatal("OSA report did not round-trip canonically")
+		}
+	}
+}
+
+func TestInspectOSALocalBindingProvenanceAndContexts(t *testing.T) {
+	for _, source := range []string{
+		"set commandValue to \"curl https://example.invalid/test\"\ndo shell script commandValue",
+		"on collect()\nset commandValue to \"curl https://example.invalid/test\"\ndo shell script commandValue\nend collect",
+		"on collect()\nif condition then\nset commandValue to \"curl https://example.invalid/test\"\ndo shell script commandValue\nend if\nend collect",
+		fmt.Sprintf("on outer()\nset commandValue to %q\ndo shell script commandValue\nend outer", `osascript -e 'on inner()' -e 'do shell script "printf test"' -e 'end inner'`),
+	} {
+		path := filepath.Join(t.TempDir(), "fixture.applescript")
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := InspectPath(path, artifact.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertReportReferencesValid(t, rep)
+		if _, err := encodeAndDecodeReport(rep); err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range rep.Operations {
+			if op.Kind == behavior.OperationNetworkConnect && len(op.EvidenceIDs) < 2 {
+				t.Fatalf("binding/call evidence was lost: %#v", op)
+			}
 		}
 	}
 }
