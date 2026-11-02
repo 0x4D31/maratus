@@ -232,6 +232,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 	var shellHeredocs shellHeredocState
 	shellCompoundDepth := 0
 	var javascriptProcessBindings javaScriptProcessBindings
+	var javascriptNetworkValues javaScriptCommandState
 	javascriptFetchSafe := false
 	if language == "javascript" {
 		javascriptProcessBindings = newJavaScriptProcessBindings(lines)
@@ -240,6 +241,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			return
 		}
 		javascriptFetchSafe = javaScriptBuiltinFetchIdentitySafe(javascriptProcessBindings.prescan)
+		javascriptNetworkValues = newJavaScriptCommandState(javascriptProcessBindings.prescan)
 	}
 	pythonSubprocessBindings := map[string]bool{}
 	for i := 0; i < len(lines); i++ {
@@ -551,6 +553,8 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		networkSemanticLine := semanticLine
 		networkCall := languageNetworkCallObserved(language, semanticLine)
 		networkCallObserved := networkCall
+		var networkDestinations []string
+		var javascriptNetworkProof []javaScriptCommandProof
 		pythonNetworkBindingName := ""
 		switch language {
 		case "python":
@@ -558,11 +562,15 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			pythonNetworkBindingName, networkSemanticLine, observed, networkCall = pythonNetworkCallBinding(semanticLine, lineNo, &pythonAPIBindings)
 			networkCallObserved = networkCallObserved || observed
 		case "javascript":
-			if networkCall {
+			if javascriptFetchSafe {
 				// Preserve the existing request/download value flow only for the
 				// globally unshadowed runtime builtin. Bound module APIs such as
 				// axios are emitted by the structural API recognizer below.
-				networkCall = javascriptFetchSafe && javaScriptDirectFetchCallObserved(semanticLine)
+				var exact bool
+				networkDestinations, javascriptNetworkProof, exact = javaScriptFetchLineDestinations(&javascriptNetworkValues, javaScriptStatements)
+				networkCall = networkCall && exact
+			} else {
+				networkCall = false
 			}
 		case "jxa":
 			if networkCall {
@@ -572,9 +580,17 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		if language == "python" && networkCallObserved && !networkCall {
 			pythonAPIBindings.unsupportedCalls = true
 		}
-		var networkDestinations []string
-		if networkCall {
+		if networkCall && language != "javascript" {
 			networkDestinations = languageNetworkDestinationsBudget(language, networkSemanticLine, vars, lineBudget)
+		}
+		var javascriptNetworkEvidence []string
+		if len(javascriptNetworkProof) > 0 {
+			proofContent := content
+			proofContent.ScopeID, proofContent.Function = semanticScopeID, fn.name
+			javascriptNetworkEvidence = javaScriptAPIProofEvidence(graph, proofContent, javascriptNetworkProof)
+			if len(javascriptNetworkEvidence) != len(javascriptNetworkProof) {
+				networkDestinations = nil
+			}
 		}
 		if variableState.limited {
 			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
@@ -616,6 +632,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			lineContent.Function = fn.name
 		}
 		lineContent.ScopeID = semanticScopeID
+		lineContent.SupportingEvidenceIDs = append(append([]string(nil), content.SupportingEvidenceIDs...), javascriptNetworkEvidence...)
 		evidenceID := addLineEvidence(graph, lineContent, lineNo, "text-line", line)
 		if pythonNetworkBindingName != "" {
 			bindingEvidenceID := pythonAPIBindings.bindingEvidence(graph, content, pythonNetworkBindingName)
@@ -2335,7 +2352,16 @@ func languageNetworkDestinationsBudget(language, line string, vars any, budget *
 			if index >= len(args) {
 				continue
 			}
-			if dest := destinationsBudget(resolveNetworkExpression(language, args[index], vars), budget); len(dest) > 0 {
+			value := resolveNetworkExpression(language, args[index], vars)
+			if language == "javascript" {
+				// A selected API argument is a complete value, not prose to
+				// search for a URL substring. Preserve query and path bytes.
+				if exactJavaScriptHTTPURL(value) {
+					return []string{value}
+				}
+				continue
+			}
+			if dest := destinationsBudget(value, budget); len(dest) > 0 {
 				return dest
 			}
 		}
@@ -2631,23 +2657,6 @@ func languageNetworkCallObserved(language, line string) bool {
 		return ok
 	}
 	return reFetch.MatchString(line)
-}
-
-func javaScriptDirectFetchCallObserved(line string) bool {
-	occurrences, exact := scanJavaScriptIdentifierOccurrencesExact(line, maxJavaScriptAPICallBytes, maxJavaScriptCommandIdentifiersPerStatement)
-	if !exact {
-		return false
-	}
-	for _, occurrence := range occurrences {
-		if occurrence.Name != "fetch" || occurrence.Write || occurrence.previousToken == "." {
-			continue
-		}
-		open := skipJavaScriptSpace(line, occurrence.Offset+len("fetch"))
-		if _, _, call := exactJavaScriptCallContent(line, open, maxJavaScriptAPICallBytes); call {
-			return true
-		}
-	}
-	return false
 }
 
 func pythonNetworkCallLocation(line string) (string, int, bool) {
