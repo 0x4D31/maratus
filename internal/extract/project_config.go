@@ -241,7 +241,23 @@ func analyzeProjectCommand(graph *behavior.Graph, content artifact.Content, plan
 		return
 	}
 	if simple {
-		analyzeShellFields(graph, content, fields, 0, execution, evidenceID, 0, nil)
+		// The shell command retains source quoting; separately supplied args
+		// must not acquire expansion/redirection merely from decoded text.
+		sourceFields, raw, err := shellCommandFieldsRaw(normalizeProjectCommandShellText(plan))
+		if err != nil {
+			return
+		}
+		paths := shellCommandPathSemantics(sourceFields, raw)
+		args := normalizeProjectCommandFields(plan, plan.args)
+		paths.argv = append(paths.argv, args...)
+		for _, value := range args {
+			mode := behavior.FilePathLiteral
+			if prior, ok := paths.modes[value]; ok && prior != mode {
+				mode = behavior.FilePathUnknown
+			}
+			paths.modes[value] = mode
+		}
+		analyzeShellFieldsWithPaths(graph, content, fields, 0, execution, evidenceID, 0, nil, paths)
 		return
 	}
 	AnalyzeShellLine(graph, content, normalizeProjectCommandShellText(plan), 0, execution, evidenceID)

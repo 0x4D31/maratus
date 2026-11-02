@@ -71,15 +71,7 @@ func shellPathInterpretations(fields, raw []string) map[string]behavior.FilePath
 	}
 	result := make(map[string]behavior.FilePathInterpretation, len(fields))
 	for i, field := range fields {
-		mode := behavior.FilePathLiteral
-		if shellWordExpandsHome(raw[i]) {
-			mode = behavior.FilePathUnknown
-			// Named users and shell-specific ~+/~- forms require different
-			// host state. Only the current HOME prefix is modeled here.
-			if raw[i] == "~" || strings.HasPrefix(raw[i], "~/") {
-				mode = behavior.FilePathHomeRelative
-			}
-		}
+		mode := shellWordPathInterpretation(raw[i])
 		if prior, exists := result[field]; exists && prior != mode {
 			mode = behavior.FilePathUnknown
 		}
@@ -88,8 +80,58 @@ func shellPathInterpretations(fields, raw []string) map[string]behavior.FilePath
 	return result
 }
 
+// This proves only a word's expansion category, never its host-specific value.
+// Unresolved substitutions and unquoted globs cannot become literal filenames.
+func shellWordPathInterpretation(raw string) behavior.FilePathInterpretation {
+	mode := behavior.FilePathLiteral
+	if shellWordExpandsHome(raw) {
+		if raw != "~" && !strings.HasPrefix(raw, "~/") {
+			return behavior.FilePathUnknown
+		}
+		mode = behavior.FilePathHomeRelative
+	}
+	homeEnd := 0
+	for _, prefix := range []string{"$HOME/", "${HOME}/", `"$HOME/`, `"${HOME}/`, `"$HOME"/`, `"${HOME}"/`} {
+		if strings.HasPrefix(raw, prefix) {
+			homeEnd = strings.IndexByte(prefix, '}') + 1
+			if homeEnd == 0 {
+				homeEnd = strings.Index(prefix, "HOME") + len("HOME")
+			}
+			mode = behavior.FilePathHomeRelative
+			break
+		}
+	}
+	quote := byte(0)
+	for index := 0; index < len(raw); index++ {
+		char := raw[index]
+		if char == '\\' && quote != '\'' {
+			index++
+			continue
+		}
+		if quote != 0 && char == quote {
+			quote = 0
+			continue
+		}
+		if quote == '\'' {
+			continue
+		}
+		if quote == 0 && (char == '\'' || char == '"') {
+			quote = char
+			continue
+		}
+		if char == '$' && index < homeEnd {
+			index = homeEnd - 1
+			continue
+		}
+		if char == '$' || char == '`' || quote == 0 && strings.ContainsRune("*?[{", rune(char)) {
+			return behavior.FilePathUnknown
+		}
+	}
+	return mode
+}
+
 func annotateShellPathContexts(graph *behavior.Graph, start int, context shellDirectoryContext, fields, raw []string) {
-	modes := shellPathInterpretations(fields, raw)
+	modes := shellCommandPathSemantics(fields, raw).modes
 	for i := start; i < len(graph.Operations); i++ {
 		operation := &graph.Operations[i]
 		if operation.WorkingDirectoryContext != 0 || operation.HomeDirectoryContext != 0 {
@@ -109,6 +151,9 @@ func annotateShellPathContexts(graph *behavior.Graph, start int, context shellDi
 }
 
 func shellDirectoryEffects(fields []string) (working, home bool) {
+	if len(fields) == 0 {
+		return false, false
+	}
 	normalized, err := normalizeCommandFieldsChecked(fields)
 	if err != nil || len(normalized) == 0 {
 		return true, true

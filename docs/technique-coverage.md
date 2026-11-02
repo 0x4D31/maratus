@@ -31,6 +31,17 @@ Other adapters do not acquire a working-directory proof merely from equal
 relative operand text. Intervening modeled mutations with unresolved file targets
 also prevent attributing earlier produced bytes to a later consumer.
 
+Command recognizers distinguish shell source from decoded executable argv.
+Only exact raw shell words establish redirection or current-home expansion;
+quoted operators and literal tilde/HOME operands do not establish startup-file
+locations. Closed stdout/stderr file redirections and `tee` operands retain
+neutral file writes, including ordinary overwrites that invalidate staged-file
+lineage. Redirection words are removed from command argv. Input redirection and
+heredoc byte consumption remain partial, as do unsupported embedded operators
+and descriptor destinations. A complete decoded process request remains visible
+when no more specific action is modeled. External wrappers do not acquire shell
+builtin or assignment syntax merely from their executable operands.
+
 JavaScript AST call operands support bounded primitive-string bindings from
 unwritten lexical declarations and function-local variables, all-string
 concatenation, untagged string templates, and complete literal argv arrays.

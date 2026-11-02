@@ -99,12 +99,36 @@ func TestNormalizeFieldsCheckedRejectsAtomicExecutableAssignmentExpansion(t *tes
 	}
 }
 
-func TestNormalizeFieldsRemovesAssignmentsAndWrappers(t *testing.T) {
+func TestNormalizeFieldsDoesNotInvokeShellBuiltinsThroughExternalWrappers(t *testing.T) {
 	fields, err := Fields(`sudo -E env PATH=/usr/bin command tar -czf "/tmp/out.tgz" "$HOME/.ssh"`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFields(t, NormalizeFields(fields), []string{"tar", "-czf", "/tmp/out.tgz", "$HOME/.ssh"})
+	assertFields(t, NormalizeFields(fields), []string{"command", "tar", "-czf", "/tmp/out.tgz", "$HOME/.ssh"})
+}
+
+func TestNormalizeArgvPreservesLiteralExecutableSyntax(t *testing.T) {
+	for _, test := range []struct {
+		fields, source, argv []string
+	}{
+		{[]string{"NAME=value", "tee", "/etc/profile"}, []string{"tee", "/etc/profile"}, []string{"NAME=value", "tee", "/etc/profile"}},
+		{[]string{"command", "tee", "/etc/profile"}, []string{"tee", "/etc/profile"}, []string{"command", "tee", "/etc/profile"}},
+		{[]string{"env", "NAME=value", "command", "tee", "/etc/profile"}, []string{"command", "tee", "/etc/profile"}, []string{"command", "tee", "/etc/profile"}},
+		{[]string{"nohup", "NAME=value", "tee", "/etc/profile"}, []string{"NAME=value", "tee", "/etc/profile"}, []string{"NAME=value", "tee", "/etc/profile"}},
+		{[]string{"sudo", "NAME=value", "tee", "/etc/profile"}, []string{"tee", "/etc/profile"}, []string{"tee", "/etc/profile"}},
+		{[]string{"command", "NAME=value", "tee", "/etc/profile"}, []string{"NAME=value", "tee", "/etc/profile"}, []string{"command", "NAME=value", "tee", "/etc/profile"}},
+	} {
+		source, err := NormalizeFieldsChecked(test.fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFields(t, source, test.source)
+		argv, err := NormalizeArgvFieldsChecked(test.fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertFields(t, argv, test.argv)
+	}
 }
 
 func TestUnwrapCommandWrappersKeepsAssignments(t *testing.T) {

