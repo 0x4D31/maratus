@@ -140,6 +140,72 @@ func TestInspectInlineOSAProgramsPreserveDialectAndHandlerContext(t *testing.T) 
 	assertNetworkDestination(t, rep, "https://example.invalid/test")
 }
 
+func TestInspectOSAOptionsDoNotInventAutomaticExecution(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{`osascript -e 'do shell script "curl https://example.invalid/test"'`, true},
+		{`osascript -s ho -e 'do shell script "curl https://example.invalid/test"'`, true},
+		{`osascript -i -e 'do shell script "curl https://example.invalid/test"'`, false},
+		{`osascript -e 'do shell script "curl https://example.invalid/test"' -i`, false},
+		{`osascript --execute 'do shell script "curl https://example.invalid/test"'`, false},
+		{`osascript -sx -e 'do shell script "curl https://example.invalid/test"'`, false},
+		{`osascript -l Ruby -e 'do shell script "curl https://example.invalid/test"'`, false},
+	} {
+		rep, err := inspectInlineShellForTest(test.command, artifact.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, op := range rep.Operations {
+			found = found || op.Kind == behavior.OperationNetworkConnect
+		}
+		if found != test.want {
+			t.Fatalf("%s: network behavior=%v, want %v", test.command, found, test.want)
+		}
+		assertReportReferencesValid(t, rep)
+		if _, err := encodeAndDecodeReport(rep); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestInspectOSAInteractiveFileDoesNotBecomeInvokedTarget(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		dir := t.TempDir()
+		command := "osascript ./fixture.data"
+		if interactive {
+			command = "osascript -i ./fixture.data"
+		}
+		for name, data := range map[string]string{
+			"package.json": `{"name":"fixture","version":"1.0.0","scripts":{"postinstall":` + fmt.Sprintf("%q", command) + `}}`,
+			"fixture.data": `do shell script "printf inert"`,
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rep, err := InspectPath(dir, artifact.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, target := range rep.InvokedTargets {
+			for _, node := range rep.ArtifactNodes {
+				found = found || node.ID == target.NodeID && filepath.Base(node.LogicalPath) == "fixture.data"
+			}
+		}
+		if found == interactive {
+			t.Fatalf("interactive=%v: unexpected invoked targets: %#v", interactive, rep.InvokedTargets)
+		}
+		assertReportReferencesValid(t, rep)
+		if _, err := encodeAndDecodeReport(rep); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestInspectOSABranchesWithinHandlerRemainReloadable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fixture.applescript")
 	source := "on collect()\nif condition then\ndo shell script \"whoami\"\nelse\ndo shell script \"uname -a\"\nend if\nend collect"

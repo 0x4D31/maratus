@@ -27,6 +27,8 @@ func TestShebangLanguageUsesExactBoundedInterpreterSemantics(t *testing.T) {
 		{name: "osascript existing program", line: "#!/usr/bin/osascript other.scpt", want: ""},
 		{name: "osascript inline", line: "#!/usr/bin/osascript -e 'return 1'", want: ""},
 		{name: "osascript interactive", line: "#!/usr/bin/osascript -i", want: ""},
+		{name: "osascript unsupported long execute", line: "#!/usr/bin/osascript --execute return", want: ""},
+		{name: "osascript repeated language outside profile", line: "#!/usr/bin/osascript -l AppleScript -l JavaScript", want: ""},
 		{name: "osascript end options existing program", line: "#!/usr/bin/osascript -- other.scpt", want: ""},
 		{name: "shell inline", line: "#!/bin/sh -c 'echo inert'", want: ""},
 		{name: "shell stdin", line: "#!/bin/sh -s", want: ""},
