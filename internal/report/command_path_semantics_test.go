@@ -163,3 +163,16 @@ func TestInspectUnquotedCurlFormRedirectionIsNotMultipartFileAccess(t *testing.T
 		t.Fatal("shell redirection became a curl multipart file operand")
 	}
 }
+
+func TestInspectDownloadedRelativeScriptSurvivesUnrelatedOutputRedirection(t *testing.T) {
+	for _, target := range []string{"./inert.log", "./inert.py"} {
+		source := "curl -o ./inert.py https://example.invalid/inert.py\npython ./inert.py > " + target + " 2>&1\n"
+		rep, err := InspectInline([]byte(source), "shell", artifact.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := hasCapability(rep, "macos.download-execute"), target != "./inert.py"; got != want {
+			t.Fatalf("download-execute=%v, want%v, output%s: %#v\n%#v", got, want, target, rep.Operations, rep.OperationRelations)
+		}
+	}
+}
