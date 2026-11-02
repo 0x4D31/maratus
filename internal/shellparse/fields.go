@@ -132,22 +132,24 @@ func NormalizeFields(fields []string) []string {
 // oversized command embedded in env -S/--split-string or shell syntax that
 // cannot be represented safely by this package's argv approximation.
 func NormalizeFieldsChecked(fields []string) ([]string, error) {
-	for depth := 0; depth < 4 && len(fields) > 0; depth++ {
-		before := fields
+	return normalizeFieldsChecked(fields, true)
+}
+
+// NormalizeArgvFieldsChecked handles actual executable argv. Assignment-looking
+// executable names and the shell's command builtin are not shell syntax here.
+func NormalizeArgvFieldsChecked(fields []string) ([]string, error) {
+	return normalizeFieldsChecked(fields, false)
+}
+
+func normalizeFieldsChecked(fields []string, shell bool) ([]string, error) {
+	if shell {
 		var err error
 		fields, err = stripAssignmentsChecked(fields)
 		if err != nil {
 			return nil, err
 		}
-		fields, err = unwrapCommandWrappersChecked(fields)
-		if err != nil {
-			return nil, err
-		}
-		if sameFields(before, fields) {
-			return fields, nil
-		}
 	}
-	return fields, nil
+	return unwrapCommandWrappersModeChecked(fields, shell, true)
 }
 
 // UnwrapCommandWrappers returns the command payload after static wrappers such
@@ -227,18 +229,31 @@ func assignmentExpansionSpansFields(value string) bool {
 }
 
 func unwrapCommandWrappersChecked(fields []string) ([]string, error) {
+	return unwrapCommandWrappersModeChecked(fields, true, false)
+}
+
+func unwrapCommandWrappersModeChecked(fields []string, shell, normalize bool) ([]string, error) {
 	for depth := 0; depth < 4 && len(fields) > 0; depth++ {
 		var next []string
 		var err error
 		switch filepath.Base(fields[0]) {
 		case "sudo":
 			next, err = unwrapSudoChecked(fields)
+			if err == nil && normalize {
+				next, err = stripAssignmentsChecked(next)
+			}
+			shell = false
 		case "env":
 			next, err = unwrapEnvChecked(fields)
+			shell = false
 		case "command":
+			if !shell {
+				return fields, nil
+			}
 			next = unwrapCommandBuiltin(fields)
 		case "nohup":
 			next = fields[1:]
+			shell = false
 		default:
 			return fields, nil
 		}

@@ -19,6 +19,7 @@ func FuzzFields(f *testing.F) {
 			t.Fatalf("raw/decoded word count differs for %q", command)
 		}
 		NormalizeFields(fields)
+		_, _ = NormalizeArgvFieldsChecked(fields)
 		UnwrapCommandWrappers(fields)
 	})
 }

@@ -198,9 +198,10 @@ func analyzeShellLineVariables(graph *behavior.Graph, content artifact.Content, 
 		if len(fields) == 0 {
 			return true
 		}
-		working, home := shellDirectoryEffects(fields)
+		paths := shellCommandPathSemantics(fields, raw)
+		working, home := shellDirectoryEffects(paths.argv)
 		defer variables.invalidateDirectoryContext(variableScope, working, home)
-		analyzeShellFields(graph, commandContent, fields, lineNo, execution, evidenceID, expansionDepth, order)
+		analyzeShellFieldsWithPaths(graph, commandContent, fields, lineNo, execution, evidenceID, expansionDepth, order, paths)
 		return true
 	})
 	if statementLimitHit {
@@ -521,8 +522,35 @@ func shellControlBoundaryByte(value byte) bool {
 }
 
 func analyzeShellFields(graph *behavior.Graph, content artifact.Content, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string, expansionDepth int, order *shellSourceOrder) {
+	before := len(graph.Operations)
+	analyzeShellFieldsWithPaths(graph, content, fields, lineNo, execution, evidenceID, expansionDepth, order, commandPathSemantics{})
+	if len(graph.Operations) == before && len(fields) > 0 {
+		// A proved argv request remains useful even when its executable has no
+		// modeled downstream action. Its arguments are literal decoded values.
+		bindings := behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, fields[0])))
+		if len(fields) > 1 {
+			bindings = append(bindings, behavior.Bind(behavior.ResourceRoleArguments, behavior.NewResource(behavior.ResourceCommand, quotedInvocationArguments(fields[1:]))))
+		}
+		graph.AddOperation(behavior.ModeledOperation{
+			SubjectNodeID: content.NodeID, ScopeID: content.ScopeID, Kind: behavior.OperationProcessExecute,
+			ResourceBindings: bindings, Qualifiers: map[string]string{"argument_encoding": "shell-quoted", "argument_coverage": "exact-argv"},
+			EvidenceIDs: shellOperationEvidence(content, evidenceID), Support: behavior.SupportCorroborated, Execution: execution, Architecture: content.Architecture, Line: lineNo,
+		})
+	}
+}
+
+func analyzeShellFieldsWithPaths(graph *behavior.Graph, content artifact.Content, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string, expansionDepth int, order *shellSourceOrder, paths commandPathSemantics) {
+	if paths.unsupported {
+		addPartialCoverageOnce(graph, content.NodeID, "shell-redirection-analysis", "a redirection was malformed or outside the bounded word grammar; command semantics were not inferred")
+		return
+	}
 	var err error
-	fields, err = normalizeCommandFieldsChecked(fields)
+	if paths.shell {
+		fields = paths.argv
+		fields, err = normalizeCommandFieldsChecked(fields)
+	} else {
+		fields, err = shellparse.NormalizeArgvFieldsChecked(fields)
+	}
 	if shellFieldLimitReached(err) {
 		addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "shell argv field or decoded-byte limit reached in a wrapped command; the oversized command was not analyzed")
 		return
@@ -534,12 +562,45 @@ func analyzeShellFields(graph *behavior.Graph, content artifact.Content, fields 
 	if err != nil {
 		return
 	}
+	tool := ""
+	if len(fields) > 0 {
+		tool = filepath.Base(fields[0])
+	}
+	if paths.inputOmitted {
+		addPartialCoverageOnce(graph, content.NodeID, "shell-redirection-analysis", "input redirection or a heredoc was removed from argv; its input bytes and consumption were not modeled")
+	}
+	targets := paths.writeTargets(tool, fields)
+	hostWrites := map[string]bool{}
+	for _, target := range targets {
+		if paths.supportsHostPath(target) && (isLaunchdPath(target) || isShellProfilePath(target)) {
+			handleLaunchdPathWrite(graph, content, tool, target, lineNo, execution, evidenceID)
+			handleShellProfileWrite(graph, content, tool, target, lineNo, execution, evidenceID)
+			hostWrites[target] = true
+		}
+	}
+	writes := paths.writes
+	if tool == "tee" {
+		writes = append(append([]string(nil), writes...), targets...)
+	}
+	seenWrites := map[string]bool{}
+	for _, target := range writes {
+		if hostWrites[target] || seenWrites[target] {
+			continue
+		}
+		seenWrites[target] = true
+		// Standard stream devices do not identify a staged filesystem file.
+		if target == "/dev/null" || target == "/dev/stdout" || target == "/dev/stderr" {
+			continue
+		}
+		graph.AddOperation(behavior.ModeledOperation{
+			SubjectNodeID: content.NodeID, ScopeID: content.ScopeID, Kind: behavior.OperationFileWrite,
+			ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleLocalOutput, behavior.NewResource(behavior.ResourceFile, paths.fileValue(target)))),
+			EvidenceIDs:      shellOperationEvidence(content, evidenceID), Support: behavior.SupportCorroborated, Execution: execution, Architecture: content.Architecture, Line: lineNo,
+		})
+	}
 	if len(fields) == 0 {
 		return
 	}
-	tool := filepath.Base(fields[0])
-	handleLaunchdPathWrite(graph, content, tool, fields, lineNo, execution, evidenceID)
-	handleShellProfileWrite(graph, content, tool, fields, lineNo, execution, evidenceID)
 	if tool == "zip" || tool == "unzip" || tool == "tar" || tool == "ditto" {
 		handleArchiveCommand(graph, content, tool, fields, lineNo, execution, evidenceID)
 		return
@@ -987,7 +1048,11 @@ ready:
 	// An assignment-looking executable with a quoted/escaped name is not a
 	// shell assignment. The argv normalizer cannot preserve that distinction.
 	for i, field := range fields {
-		if name, _, ok := splitShellAssignment(field); ok && !strings.HasPrefix(raw[i], name+"=") {
+		name, _, assignment := splitShellAssignment(field)
+		if !assignment {
+			break
+		}
+		if !strings.HasPrefix(raw[i], name+"=") {
 			return nil, nil, shellparse.ErrUnsupportedSyntax
 		}
 	}
@@ -1129,9 +1194,8 @@ func osaInlineProgram(fields []string) (string, string, bool) {
 	return parsed.Language, strings.Join(parsed.Lines, "\n"), true
 }
 
-func handleLaunchdPathWrite(graph *behavior.Graph, content artifact.Content, tool string, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
-	target := launchdWriteTarget(tool, fields)
-	if target == "" {
+func handleLaunchdPathWrite(graph *behavior.Graph, content artifact.Content, tool, target string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
+	if !isLaunchdPath(target) {
 		return
 	}
 	category, ok := launchdInstallPathCategory(target)
@@ -1168,16 +1232,8 @@ func handleLaunchdPathWrite(graph *behavior.Graph, content artifact.Content, too
 	})
 }
 
-func launchdWriteTarget(tool string, fields []string) string {
-	if target := pathWriteTarget(tool, fields); isLaunchdPath(target) {
-		return target
-	}
-	return ""
-}
-
-func handleShellProfileWrite(graph *behavior.Graph, content artifact.Content, tool string, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
-	target := shellProfileWriteTarget(tool, fields)
-	if target == "" {
+func handleShellProfileWrite(graph *behavior.Graph, content artifact.Content, tool, target string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
+	if !isShellProfilePath(target) {
 		return
 	}
 	value := staticShellResource(target)
@@ -1201,46 +1257,6 @@ func handleShellProfileWrite(graph *behavior.Graph, content artifact.Content, to
 		Architecture: content.Architecture,
 		Line:         lineNo,
 	})
-}
-
-func shellProfileWriteTarget(tool string, fields []string) string {
-	if target := pathWriteTarget(tool, fields); isShellProfilePath(target) {
-		return target
-	}
-	return ""
-}
-
-func pathWriteTarget(tool string, fields []string) string {
-	switch tool {
-	case "cp", "mv", "install", "tee":
-		return lastNonFlag(fields)
-	case "cat", "printf", "echo":
-		return redirectionTarget(fields)
-	default:
-		return ""
-	}
-}
-
-func redirectionTarget(fields []string) string {
-	for i := 1; i < len(fields); i++ {
-		field := fields[i]
-		if isRedirectionOperator(field) && i+1 < len(fields) {
-			return fields[i+1]
-		}
-		if strings.HasPrefix(field, ">") && len(field) > 1 {
-			return strings.TrimLeft(field, ">")
-		}
-	}
-	return ""
-}
-
-func isRedirectionOperator(field string) bool {
-	switch field {
-	case ">", ">>", "1>", "1>>":
-		return true
-	default:
-		return false
-	}
 }
 
 func isLaunchdPath(value string) bool {
@@ -1408,8 +1424,9 @@ func handlePipeline(graph *behavior.Graph, content artifact.Content, line string
 		return false
 	}
 	parsed := make([][]string, len(parts))
+	paths := make([]commandPathSemantics, len(parts))
 	for index, part := range parts {
-		fields, err := shellCommandFields(strings.TrimSpace(part))
+		fields, raw, err := shellCommandFieldsRaw(strings.TrimSpace(part))
 		if shellFieldLimitReached(err) {
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "shell argv field or decoded-byte limit reached in a pipeline; the pipeline was not analyzed")
 			return true
@@ -1418,6 +1435,7 @@ func handlePipeline(graph *behavior.Graph, content artifact.Content, line string
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "malformed shell pipeline syntax was not analyzed")
 			return true
 		}
+		paths[index] = shellCommandPathSemantics(fields, raw)
 		fields, err = normalizeCommandFieldsChecked(fields)
 		if shellFieldLimitReached(err) {
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "shell argv field or decoded-byte limit reached in a wrapped pipeline command; the pipeline was not analyzed")
@@ -1466,7 +1484,7 @@ func handlePipeline(graph *behavior.Graph, content artifact.Content, line string
 		if consumed[index] || len(fields) == 0 {
 			continue
 		}
-		analyzeShellFields(graph, content, fields, lineNo, execution, evidenceID, expansionDepth, order)
+		analyzeShellFieldsWithPaths(graph, content, fields, lineNo, execution, evidenceID, expansionDepth, order, paths[index])
 		if index > 0 && shellPipelineInterpreter(fields) {
 			addPartialCoverageOnce(graph, content.NodeID, "shell-analysis", "an interpreter reads from a pipeline whose program content was not statically recovered")
 		}
