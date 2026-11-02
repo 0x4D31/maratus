@@ -16,6 +16,11 @@ executing it; that input does not become an execution target. Unsupported
 languages, option aliases, malformed options, and exhausted parsing budgets do
 not establish program execution. Script arguments do not change host options.
 
+Native static argument vectors require a terminating null pointer and bounded
+NUL-terminated strings, including valid empty arguments. Their bindings retain
+the vector terminator as evidence. Argument-dependent classifications require
+the complete binding and its evidence to fit the report budgets.
+
 | Area | Technique | Typed model | Adapters | Status and boundary |
 | --- | --- | --- | --- | --- |
 | Activation | App, package, project, extension, module, package lifecycle, Cargo build script | roots and invoked targets | artifact metadata | supported for documented bounded profiles; dependency selection and runtime success remain conditional |

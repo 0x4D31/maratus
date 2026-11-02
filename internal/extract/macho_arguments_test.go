@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"debug/macho"
 	"encoding/binary"
+	"strings"
 	"testing"
 
 	"github.com/0x4D31/maratus/internal/artifact"
@@ -13,14 +14,14 @@ import (
 func TestReadMachOStaticArgvIndexedRequiresExactTerminatedPointerArray(t *testing.T) {
 	file, index := staticArgvMachOFixture(t, true)
 	arguments, ok := readMachOStaticArgvIndexed(file, index, 0x2000)
-	if !ok || len(arguments) != 2 {
+	if !ok || len(arguments.Arguments) != 2 {
 		t.Fatalf("argv = %#v ok=%v", arguments, ok)
 	}
-	if arguments[0].Value != "/usr/bin/id" || arguments[1].Value != "--version" {
+	if arguments.Arguments[0].Value != "/usr/bin/id" || arguments.Arguments[1].Value != "--version" {
 		t.Fatalf("argv values = %#v", arguments)
 	}
-	if arguments[1].SlotOffset != 0x208 || arguments[1].LiteralOffset != 0x30c {
-		t.Fatalf("argv lineage = %#v", arguments[1])
+	if arguments.Arguments[1].SlotOffset != 0x208 || arguments.Arguments[1].LiteralOffset != 0x30c || arguments.TerminatorVA != 0x2010 || arguments.TerminatorOffset != 0x210 {
+		t.Fatalf("argv lineage = %#v", arguments)
 	}
 
 	unterminated, unterminatedIndex := staticArgvMachOFixture(t, false)
@@ -32,6 +33,127 @@ func TestReadMachOStaticArgvIndexedRequiresExactTerminatedPointerArray(t *testin
 	}
 	if values, ok := readMachOStaticArgvIndexed(file, index, 0x2001); ok || values != nil {
 		t.Fatalf("unaligned bytes were accepted as argv = %#v ok=%v", values, ok)
+	}
+}
+
+func TestArgvLiteralRequiresAnUnambiguousBoundedNULTerminator(t *testing.T) {
+	for _, tt := range []struct {
+		name, data, value string
+		want              bool
+	}{
+		{"ordinary", "inert\x00tail", "inert", true},
+		{"empty", "\x00", "", true},
+		{"unterminated section end", "inert", "", false},
+		{"nonprintable", "\x01\x00", "", false},
+		{"last bounded byte", strings.Repeat("a", 4095) + "\x00", strings.Repeat("a", 4095), true},
+		{"past bound", strings.Repeat("a", 4096) + "\x00", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			section := &macho.Section{SectionHeader: macho.SectionHeader{Seg: "__TEXT", Name: "__cstring", Addr: 0x3000, Size: uint64(len(tt.data)), Offset: 0x300}, ReaderAt: strings.NewReader(tt.data)}
+			index := newMachOSectionIndex(&macho.File{Sections: []*macho.Section{section}})
+			value, va, offset, ok := readMachOArgvLiteral(index, 0x3000)
+			if ok != tt.want || ok && (value != tt.value || va != 0x3000 || offset != 0x300) {
+				t.Fatalf("literal=%q VA=%x offset=%x ok=%v", value, va, offset, ok)
+			}
+			_, _, _, callOK := cstringAtTargetLocationIndexed(&macho.File{}, index, 0x3000, false)
+			if callOK != (tt.want && tt.value != "") {
+				t.Fatal("an empty or unterminated literal became a concrete call operand")
+			}
+		})
+	}
+	sections := []*macho.Section{}
+	for _, addr := range []uint64{0x3000, 0x4000} {
+		sections = append(sections, &macho.Section{SectionHeader: macho.SectionHeader{Seg: "__TEXT", Name: "__cstring", Addr: addr, Size: 2}, ReaderAt: strings.NewReader("a\x00")})
+	}
+	index := newMachOSectionIndex(&macho.File{Sections: sections})
+	index.imageBase = 0x1000
+	if _, _, _, ok := readMachOArgvLiteral(index, 0x3000); ok {
+		t.Fatal("two valid pointer interpretations were accepted as one literal")
+	}
+}
+
+func TestNativeArgvPreservesEmptyArgumentAndRejectsUnterminatedLiteral(t *testing.T) {
+	for _, data := range []string{"/usr/bin/id\x00\x00", "/usr/bin/id\x00tail"} {
+		file, _ := staticArgvMachOFixture(t, true)
+		file.Sections[1].Size = uint64(len(data))
+		file.Sections[1].ReaderAt = strings.NewReader(data)
+		vector, ok := readMachOStaticArgvIndexed(file, newMachOSectionIndex(file), 0x2000)
+		if strings.HasSuffix(data, "tail") {
+			if ok {
+				t.Fatal("section boundary was treated as a C-string terminator")
+			}
+			continue
+		}
+		if !ok || len(vector.Arguments) != 2 || vector.Arguments[1].Value != "" {
+			t.Fatalf("empty argument lost: %#v", vector)
+		}
+		var graph behavior.Graph
+		lookup := newMachOCallLookup(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "fixture"}, "arm64")
+		op := behavior.ModeledOperation{SubjectNodeID: "node-1"}
+		if !bindMachOStaticArgv(lookup, &op, vector) {
+			t.Fatal("complete argv was not bound")
+		}
+		binding, found := op.FirstBinding(behavior.ResourceRoleArguments)
+		if !found || binding.Resource.Value != `["/usr/bin/id",""]` {
+			t.Fatalf("empty argument changed: %#v", binding)
+		}
+		if last := graph.Evidence[len(graph.Evidence)-1]; last.Kind != "argv-null-slot" || last.VA != vector.TerminatorVA || last.Offset != int64(vector.TerminatorOffset) {
+			t.Fatalf("vector terminator proof lost: %#v", last)
+		}
+	}
+}
+
+func TestNativeArgvIncompleteEvidenceCannotClassifyArguments(t *testing.T) {
+	for _, limit := range []int{0, 2, 5} {
+		file, index := staticArgvMachOFixture(t, true)
+		vector, ok := readMachOStaticArgvIndexed(file, index, 0x2000)
+		if !ok {
+			t.Fatal("fixture was not read")
+		}
+		vector.Arguments[1].Value = "--dangerously-skip-permissions"
+		graph := behavior.Graph{EvidenceLimit: limit}
+		content := artifact.Content{NodeID: "node-1", LogicalPath: "fixture"}
+		call := graph.AddEvidence(behavior.Evidence{NodeID: "node-1", Method: "test", Kind: "call", Value: "execve"})
+		lookup := newMachOCallLookup(&graph, content, "arm64")
+		addOperationFromCalledImportedSymbolWithContextIndexed(lookup, "_execve", call, machoFunction{Name: "main"}, machoCallContext{
+			ArgumentVector:  vector,
+			StringArguments: [6]machoCallStringArgument{{Value: "/usr/local/bin/claude", EvidenceIDs: []string{call}}},
+		})
+		if len(graph.Operations) != 1 {
+			t.Fatalf("neutral operation was lost: %#v", graph.Operations)
+		}
+		op := graph.Operations[0]
+		_, bound := op.FirstBinding(behavior.ResourceRoleArguments)
+		if bound != (limit == 0) || (op.Qualifiers["agent_profile"] != "") != bound {
+			t.Fatalf("limit=%d: incomplete argv classified arguments: %#v", limit, op)
+		}
+	}
+}
+
+func TestNativeArgvEncodedSizeCannotClassifyUnretainedArguments(t *testing.T) {
+	file, index := staticArgvMachOFixture(t, true)
+	vector, ok := readMachOStaticArgvIndexed(file, index, 0x2000)
+	if !ok {
+		t.Fatal("fixture was not read")
+	}
+	vector.Arguments[1].Value = "--dangerously-skip-permissions"
+	for i := 0; i < 2; i++ {
+		vector.Arguments = append(vector.Arguments, machoStaticArgument{Value: strings.Repeat(`"`, 4090)})
+	}
+	var graph behavior.Graph
+	content := artifact.Content{NodeID: "node-1", LogicalPath: "fixture"}
+	call := graph.AddEvidence(behavior.Evidence{NodeID: "node-1", Method: "test", Kind: "call", Value: "execve"})
+	lookup := newMachOCallLookup(&graph, content, "arm64")
+	addOperationFromCalledImportedSymbolWithContextIndexed(lookup, "_execve", call, machoFunction{Name: "main"}, machoCallContext{
+		ArgumentVector:  vector,
+		StringArguments: [6]machoCallStringArgument{{Value: "/usr/local/bin/claude", EvidenceIDs: []string{call}}},
+	})
+	if len(graph.Operations) != 1 {
+		t.Fatalf("neutral call was lost: %#v", graph.Operations)
+	}
+	op := graph.Operations[0]
+	if _, bound := op.FirstBinding(behavior.ResourceRoleArguments); bound || op.Qualifiers["agent_profile"] != "" {
+		t.Fatalf("unretained argv affected semantics: %#v", op)
 	}
 }
 
@@ -51,7 +173,7 @@ func TestNativeExecOperationBindsExactStaticArgv(t *testing.T) {
 	}
 	operation := graph.Operations[0]
 	binding, ok := operation.FirstBinding(behavior.ResourceRoleArguments)
-	if !ok || binding.Resource.Kind != behavior.ResourceCommand || binding.Resource.Value != `["/usr/bin/id","--version"]` || len(binding.EvidenceIDs) != 4 {
+	if !ok || binding.Resource.Kind != behavior.ResourceCommand || binding.Resource.Value != `["/usr/bin/id","--version"]` || len(binding.EvidenceIDs) != 5 {
 		t.Fatalf("arguments binding = %#v", binding)
 	}
 	if operation.Qualifiers["argument_binding"] != "exact-static-argv" || operation.Qualifiers["function_origin"] != "go-other" {
@@ -113,7 +235,7 @@ func assertStaticArgvOperation(t *testing.T, count int, operations []behavior.Mo
 		t.Fatalf("call count=%d operations=%#v", count, operations)
 	}
 	binding, ok := operations[0].FirstBinding(behavior.ResourceRoleArguments)
-	if !ok || binding.Resource.Value != `["/usr/bin/id","--version"]` || len(binding.EvidenceIDs) != 4 {
+	if !ok || binding.Resource.Value != `["/usr/bin/id","--version"]` || len(binding.EvidenceIDs) != 5 {
 		t.Fatalf("static argv binding = %#v", binding)
 	}
 }
