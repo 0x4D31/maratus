@@ -258,6 +258,52 @@ func TestOSANestedDialogExpressions(t *testing.T) {
 	}
 }
 
+func TestOSAHeaderWhitespacePreservesContexts(t *testing.T) {
+	var graph behavior.Graph
+	source := "on\tcollect()\ndo shell script \"printf dormant\"\nend\tcollect\ndo shell script \"printf top\""
+	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	found := false
+	for _, op := range graph.Operations {
+		if op.Line == 2 {
+			found = true
+			if op.SourceFunction != "collect" || op.Execution.Connectivity != behavior.ConnectivityUnknown {
+				t.Fatalf("tab-separated handler lost its context: %#v", op)
+			}
+		}
+		if op.Line == 4 && op.SourceFunction != "" {
+			t.Fatalf("top-level statement inherited the handler: %#v", op)
+		}
+	}
+	if !found {
+		t.Fatal("handler behavior was lost")
+	}
+	var opaque behavior.Graph
+	source = "using\tterms\tfrom application \"Other\"\ndo shell script \"printf unsupported\"\nend\tusing\tterms\tfrom"
+	ExtractText(&opaque, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	if len(opaque.Operations) != 0 {
+		t.Fatal("tab-separated terminology context acquired local Standard Additions semantics")
+	}
+}
+
+func TestOSAEmbeddedStatementBoundariesDoNotMergeHeaders(t *testing.T) {
+	var graph behavior.Graph
+	source := "on collect()\rdo shell script \"printf dormant\"\rend collect\ndo shell script \"printf top\""
+	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	if len(graph.Operations) != 0 {
+		t.Fatal("unparsed CR statements were merged into a handler header")
+	}
+	var literal behavior.Graph
+	source = "set note to \"one\rtwo\"\ndo shell script \"printf top\""
+	ExtractText(&literal, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	found := false
+	for _, op := range literal.Operations {
+		found = found || op.Kind == behavior.OperationInterpreterInvoke && op.Line == 2
+	}
+	if !found {
+		t.Fatal("a CR inside string data erased the following supported statement")
+	}
+}
+
 func TestOSAQuotedCommandDataDoesNotBecomeCommunication(t *testing.T) {
 	var graph behavior.Graph
 	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", MediaType: "text/plain", SemanticLanguage: "applescript", Data: []byte(`do shell script ("printf '%s' " & quoted form of "curl https://example.invalid/decoy")`)})
