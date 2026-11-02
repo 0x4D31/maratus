@@ -3060,9 +3060,10 @@ func analyzeAppleScriptLineBudget(graph *behavior.Graph, content artifact.Conten
 
 func addOSAShellInvocation(graph *behavior.Graph, content artifact.Content, command string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
 	graph.AddOperation(behavior.ModeledOperation{
-		SubjectNodeID: content.NodeID,
-		ScopeID:       content.ScopeID,
-		Kind:          behavior.OperationInterpreterInvoke,
+		SubjectNodeID:  content.NodeID,
+		ScopeID:        content.ScopeID,
+		SourceFunction: content.Function,
+		Kind:           behavior.OperationInterpreterInvoke,
 		ResourceBindings: behavior.Bindings(
 			behavior.Bind(behavior.ResourceRoleArguments, behavior.NewResource(behavior.ResourceCommand, command)),
 			behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, "/bin/sh", behavior.ResourceClassInterpreter)),
