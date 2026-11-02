@@ -2,6 +2,7 @@ package extract
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/0x4D31/maratus/internal/artifact"
 	"github.com/0x4D31/maratus/internal/behavior"
@@ -17,8 +18,8 @@ type jxaShellReceiver struct {
 }
 
 // JXA uses the shared syntax parser, not Node module semantics. This profile
-// admits direct program-level calls on a stable current-application receiver.
-// Receiver aliases, escapes, other member uses, nested calls, and dynamic
+// admits scoped calls on a stable program-level current-application receiver.
+// Receiver aliases, escapes, other member uses, and dynamic
 // namespace access invalidate the proof instead of guessing host behavior.
 func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, source string) {
 	doc, err := parseJavaScriptAST(source, false)
@@ -31,12 +32,9 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 		addPartialCoverageOnce(graph, content.NodeID, "jxa-standard-additions", err.Error())
 		return
 	}
-	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: []int{0}}
-	for i, c := range source {
-		if c == '\n' {
-			state.lines = append(state.lines, i+1)
-		}
-	}
+	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: javaScriptASTLineOffsets(source)}
+	state.values = newJavaScriptASTValues(bindings)
+	defer state.valueCoverage()
 	receivers := map[*javaScriptASTBinding]*jxaShellReceiver{}
 	allowedFactory := map[*ast.Identifier]bool{}
 	factorySafe := len(bindings.dynamic) == 0 && bindings.lookup(0, "Application") == nil
@@ -99,7 +97,7 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 		if receiver == nil {
 			continue
 		}
-		if located.parent < 0 || located.scope != 0 || !state.exactIdentifier(name) {
+		if located.parent < 0 || !state.exactIdentifier(name) {
 			receiver.invalid = true
 			continue
 		}
@@ -116,7 +114,7 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 		}
 		if dot.Identifier.Name.String() == "includeStandardAdditions" {
 			assignment, ok := consumer.node.(*ast.AssignExpression)
-			if ok && direct && assignment.Left == dot && assignment.Operator.String() == "=" && consumer.spanKnown && consumer.span.start >= receiver.initialEnd {
+			if ok && direct && located.scope == 0 && assignment.Left == dot && assignment.Operator.String() == "=" && consumer.spanKnown && consumer.span.start >= receiver.initialEnd {
 				value, literal := assignment.Right.(*ast.BooleanLiteral)
 				if literal && value.Value && receiver.setting == nil {
 					receiver.setting, receiver.readyAt = assignment, consumer.span.end
@@ -124,13 +122,13 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 				}
 			}
 		} else if dot.Identifier.Name.String() == "doShellScript" {
-			if call, ok := consumer.node.(*ast.CallExpression); ok && direct && call.Callee == dot {
+			if call, ok := consumer.node.(*ast.CallExpression); ok && call.Callee == dot {
 				continue
 			}
 		}
 		receiver.invalid = true
 	}
-	addPartialCoverageOnce(graph, content.NodeID, "jxa-standard-additions", "only stable program-level current-application Standard Additions shell calls are modeled; other receivers, nested contexts and unresolved expressions remain partial")
+	addPartialCoverageOnce(graph, content.NodeID, "jxa-standard-additions", "only stable program-level current-application receivers with preceding Standard Additions enablement are modeled; function and branch calls retain unknown connectivity and unresolved operands remain unknown; other receivers and bridge APIs remain partial")
 	// currentApplication wrappers are not proved independent mutable objects.
 	// An escaped or changed wrapper cannot leave another wrapper trusted.
 	for _, receiver := range receivers {
@@ -157,7 +155,10 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 	sort.SliceStable(calls, func(i, j int) bool { return calls[i].span.start < calls[j].span.start })
 	for _, located := range calls {
 		call, ok := located.node.(*ast.CallExpression)
-		if !ok || !located.spanKnown || located.scope != 0 || len(call.ArgumentList) != 1 {
+		if !ok || !located.spanKnown || len(call.ArgumentList) != 1 {
+			continue
+		}
+		if _, spread := call.ArgumentList[0].(*ast.SpreadElement); spread {
 			continue
 		}
 		dot, ok := call.Callee.(*ast.DotExpression)
@@ -168,7 +169,7 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 		if !ok {
 			continue
 		}
-		receiver := receivers[bindings.lookup(0, name.Name.String())]
+		receiver := receivers[bindings.lookup(located.scope, name.Name.String())]
 		if receiver == nil || receiver.invalid || receiver.setting == nil || located.span.start < receiver.readyAt {
 			continue
 		}
@@ -176,20 +177,37 @@ func extractJXAShellCalls(graph *behavior.Graph, content artifact.Content, sourc
 			graph.MarkWorkOmitted()
 			break
 		}
-		argument, exact := call.ArgumentList[0].(*ast.StringLiteral)
-		command := ""
-		if exact && len(argument.Value.String()) <= maxOSAExpressionBytes {
-			command = argument.Value.String()
+		callContent, known := state.scopeContent(located.scope)
+		if !known {
+			continue
+		}
+		if content.Function != "" && (content.ScopeID != callContent.ScopeID || content.Function != callContent.Function) {
+			addPartialCoverageOnce(graph, content.NodeID, "jxa-standard-additions-context", "the receiver setup required incompatible function/block evidence contexts; the affected call was not promoted")
+			continue
+		}
+		command, causal, _ := state.stringValue(call.ArgumentList[0], located.scope, located.span.start)
+		if strings.ContainsRune(command, 0) {
+			command = ""
+			addPartialCoverageOnce(graph, content.NodeID, "osa-command-arguments", "a JXA shell command contained a NUL character; its command remains unknown")
+		}
+		if len(command) > maxOSAExpressionBytes {
+			command, causal = "", nil
+			state.values.limited = true
 		}
 		initial := state.evidence(content, receiver.initial, "jxa-current-application")
 		setting := state.evidence(content, receiver.setting, "jxa-standard-additions-enabled")
-		proof := state.evidence(content, call, "jxa-shell-call")
+		proof := state.evidence(callContent, call, "jxa-shell-call")
 		if initial == "" || setting == "" || proof == "" {
 			continue
 		}
 		line := state.line(located.span.start)
-		callContent := content
 		callContent.SupportingEvidenceIDs = append(append([]string(nil), content.SupportingEvidenceIDs...), initial, setting)
-		addOSAShellInvocation(graph, callContent, command, line, executionContextForContent(content), proof)
+		if retained, complete := mergeJavaScriptASTValueEvidence(callContent.SupportingEvidenceIDs, causal); complete {
+			callContent.SupportingEvidenceIDs = retained
+		} else {
+			command = ""
+			state.values.limited = true
+		}
+		addOSAShellInvocation(graph, callContent, command, line, executionContextForContent(callContent), proof)
 	}
 }

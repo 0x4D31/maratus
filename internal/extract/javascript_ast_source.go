@@ -59,13 +59,8 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 		addPartialCoverageOnce(graph, content.NodeID, javaScriptASTAnalysisArea, err.Error()+"; source semantics were not inferred")
 		return
 	}
-	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: []int{0}}
+	state := javaScriptASTExtraction{graph: graph, content: content, doc: doc, scopes: map[int]string{}, lines: javaScriptASTLineOffsets(source)}
 	state.values = newJavaScriptASTValues(bindings)
-	for offset, char := range source {
-		if char == '\n' {
-			state.lines = append(state.lines, offset+1)
-		}
-	}
 	addPartialCoverageOnce(graph, content.NodeID, javaScriptASTAnalysisArea,
 		"AST frontend retained bounded CommonJS namespace calls; named imports, destructured aliases, interop wrappers, helper argument propagation, control-flow feasibility and a complete call graph are not modeled; unresolved resources remain unknown")
 	if len(doc.unlocated) > 0 {
@@ -214,12 +209,7 @@ func extractJavaScriptASTSource(graph *behavior.Graph, content artifact.Content,
 			graph.AddNetworkImplementation(observation)
 		}
 	}
-	if state.values.limited {
-		addPartialCoverageOnce(graph, content.NodeID, "javascript-ast-value-analysis", "bounded lexical string resolution reached its value, depth, work or provenance limit; unresolved values remain unknown")
-	}
-	if state.values.encodingUnsupported {
-		addPartialCoverageOnce(graph, content.NodeID, "javascript-ast-string-encoding", "some JavaScript strings contain unpaired UTF-16 surrogates; they were not replaced with guessed UTF-8 operands")
-	}
+	state.valueCoverage()
 }
 
 func (bindings *javaScriptASTBindings) builtinFetchSafe() bool {
@@ -304,6 +294,25 @@ type javaScriptASTExtraction struct {
 
 func (state *javaScriptASTExtraction) line(offset int) int {
 	return sort.Search(len(state.lines), func(i int) bool { return state.lines[i] > offset })
+}
+
+func javaScriptASTLineOffsets(source string) []int {
+	lines := []int{0}
+	for offset, char := range source {
+		switch char {
+		case '\r':
+			lines = append(lines, offset+1)
+		case '\n':
+			if offset > 0 && source[offset-1] == '\r' {
+				lines[len(lines)-1] = offset + 1
+			} else {
+				lines = append(lines, offset+1)
+			}
+		case '\u2028', '\u2029':
+			lines = append(lines, offset+3)
+		}
+	}
+	return lines
 }
 
 func (state *javaScriptASTExtraction) exactIdentifier(node *ast.Identifier) bool {

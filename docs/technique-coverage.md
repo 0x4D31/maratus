@@ -39,6 +39,14 @@ not selected endpoints. An exact unshadowed `fetch` request with an unresolved
 destination retains a neutral network operation with an unknown endpoint.
 Neither the call nor its static connectivity establishes successful contact.
 
+JXA Standard Additions shell calls reuse the bounded primitive-string resolver.
+A stable program-level current-application receiver and preceding enablement
+are still required. Assigned, returned, and chained call results are admitted;
+function and branch calls retain their own scopes with unknown connectivity.
+Receiver mutation, escape, dynamic host identity, and incompatible value proof
+contexts prevent promotion. Helper returns, shell output, and native bridge APIs
+are not evaluated, and Node API semantics are not applied to JXA.
+
 | Area | Technique | Typed model | Adapters | Status and boundary |
 | --- | --- | --- | --- | --- |
 | Activation | App, package, project, extension, module, package lifecycle, Cargo build script | roots and invoked targets | artifact metadata | supported for documented bounded profiles; dependency selection and runtime success remain conditional |

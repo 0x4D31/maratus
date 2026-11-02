@@ -31,6 +31,18 @@ type javaScriptASTValues struct {
 	encodingUnsupported bool
 }
 
+func (state *javaScriptASTExtraction) valueCoverage() {
+	if state.values == nil {
+		return
+	}
+	if state.values.limited {
+		addPartialCoverageOnce(state.graph, state.content.NodeID, "javascript-ast-value-analysis", "bounded lexical string resolution reached its value, depth, work or provenance limit; unresolved values remain unknown")
+	}
+	if state.values.encodingUnsupported {
+		addPartialCoverageOnce(state.graph, state.content.NodeID, "javascript-ast-string-encoding", "some JavaScript strings contain unpaired UTF-16 surrogates; they were not replaced with guessed UTF-8 operands")
+	}
+}
+
 func javaScriptASTUTF8String(value unistring.String) (string, bool) {
 	units := value.AsUtf16()
 	for i := 1; i < len(units); i++ {
@@ -217,6 +229,9 @@ func (state *javaScriptASTExtraction) stringValue(expression ast.Expression, sco
 			state.values.encodingUnsupported = true
 		}
 		if !known || !valid || len(value) > maxJavaScriptCommandValueBytes {
+			if len(value) > maxJavaScriptCommandValueBytes && state.values != nil {
+				state.values.limited = true
+			}
 			return "", nil, false
 		}
 		// The call evidence already contains this complete literal. Preserve

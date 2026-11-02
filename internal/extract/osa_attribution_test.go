@@ -106,7 +106,7 @@ func TestJXAStandardAdditionsReceiverProof(t *testing.T) {
 		{"constructor escape", `const f = [].filter.constructor; f(source)();` + init + enable + invoke, false},
 		{"other wrapper mutation", init + enable + `const other = Application.currentApplication(); other.doShellScript = replacement;` + invoke, false},
 		{"dynamic evaluation", init + enable + `eval(source);` + invoke, false},
-		{"nested function", init + enable + `function dormant() {` + invoke + `}`, false},
+		{"nested function", init + enable + `function dormant() {` + invoke + `}`, true},
 		{"conditional receiver", `if (condition) {` + init + enable + invoke + `}`, false},
 		{"unresolved value", init + enable + `app.doShellScript("curl " + unknown);`, false},
 		{"malformed", init + enable + `app.doShellScript("curl`, false},
