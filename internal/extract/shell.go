@@ -9,6 +9,7 @@ import (
 
 	"github.com/0x4D31/maratus/internal/artifact"
 	"github.com/0x4D31/maratus/internal/behavior"
+	"github.com/0x4D31/maratus/internal/osacli"
 	"github.com/0x4D31/maratus/internal/shellparse"
 )
 
@@ -1092,50 +1093,14 @@ func handleOSAScript(graph *behavior.Graph, content artifact.Content, fields []s
 // -e arguments are successive lines of one program, not independent scripts.
 // After a positional program/argument, later -e text is data rather than code.
 func osaInlineProgram(fields []string) (string, string, bool) {
-	language := "applescript"
-	languageSet := false
-	var out []string
-	for i := 1; i < len(fields); i++ {
-		if i >= maxInterpreterArgumentTokens {
-			return "", "", false
-		}
-		field := fields[i]
-		switch {
-		case field == "-e" || field == "--execute":
-			if i+1 >= len(fields) {
-				return "", "", false
-			}
-			out = append(out, fields[i+1])
-			i++
-		case strings.HasPrefix(field, "-e") && len(field) > 2:
-			out = append(out, strings.TrimPrefix(field, "-e"))
-		case field == "-l" || strings.HasPrefix(field, "-l") && len(field) > 2:
-			name := strings.TrimPrefix(field, "-l")
-			if field == "-l" {
-				if i+1 >= len(fields) {
-					return "", "", false
-				}
-				i++
-				name = fields[i]
-			}
-			if languageSet {
-				return "", "", false
-			}
-			languageSet = true
-			switch strings.ToLower(name) {
-			case "javascript":
-				language = "jxa"
-			case "applescript":
-			default:
-				return "", "", false
-			}
-		case field == "--" || !strings.HasPrefix(field, "-"):
-			return language, strings.Join(out, "\n"), len(out) > 0
-		default:
-			return "", "", false
-		}
+	if len(fields) == 0 {
+		return "", "", false
 	}
-	return language, strings.Join(out, "\n"), len(out) > 0
+	parsed := osacli.Parse(fields[1:])
+	if !parsed.Executes() || parsed.Source != osacli.Inline {
+		return "", "", false
+	}
+	return parsed.Language, strings.Join(parsed.Lines, "\n"), true
 }
 
 func handleLaunchdPathWrite(graph *behavior.Graph, content artifact.Content, tool string, fields []string, lineNo int, execution behavior.ExecutionContext, evidenceID string) {
@@ -2039,27 +2004,8 @@ func stripPipelineOutputRedirections(fields []string) []string {
 }
 
 func osascriptReadsProgramFromStdin(args []string) bool {
-	for index := 0; index < len(args); index++ {
-		switch args[index] {
-		case "-":
-			if index != len(args)-1 {
-				return false
-			}
-		case "-l", "-s":
-			if index+1 >= len(args) {
-				return false
-			}
-			index++
-		case "-e", "--execute":
-			return false
-		default:
-			if strings.HasPrefix(args[index], "-e") {
-				return false
-			}
-			return false
-		}
-	}
-	return true
+	parsed := osacli.Parse(args)
+	return parsed.Executes() && parsed.Source == osacli.Stdin
 }
 
 func hasStdinRedirection(args []string) bool {

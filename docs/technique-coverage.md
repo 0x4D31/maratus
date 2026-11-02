@@ -10,6 +10,12 @@ Capability rules require operation-backed `CORROBORATED` support. A static
 `CONNECTED` result means only that the retained graph reaches the operation
 from a declared root; it is never observed execution or successful effect.
 
+`osascript` file, inline, stdin, and appended-target selection share one bounded
+option profile. Interactive mode loads a supplied program without automatically
+executing it; that input does not become an execution target. Unsupported
+languages, option aliases, malformed options, and exhausted parsing budgets do
+not establish program execution. Script arguments do not change host options.
+
 | Area | Technique | Typed model | Adapters | Status and boundary |
 | --- | --- | --- | --- | --- |
 | Activation | App, package, project, extension, module, package lifecycle, Cargo build script | roots and invoked targets | artifact metadata | supported for documented bounded profiles; dependency selection and runtime success remain conditional |

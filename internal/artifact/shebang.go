@@ -1,6 +1,10 @@
 package artifact
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/0x4D31/maratus/internal/osacli"
+)
 
 const (
 	// XNU's interpreter activator scans exactly IMG_SHSIZE bytes and rejects a
@@ -124,9 +128,9 @@ func targetLanguageForInterpreter(name string, arguments []string) string {
 		}
 		return ""
 	case "osascript":
-		language, consumesTarget := parseOSAScriptArguments(arguments)
-		if consumesTarget {
-			return language
+		parsed := osacli.Parse(arguments)
+		if parsed.Executes() && parsed.AcceptsAppendedProgram {
+			return parsed.Language
 		}
 		return ""
 	default:
@@ -189,90 +193,11 @@ func languageForInterpreter(interpreter string, arguments []string) string {
 }
 
 func osascriptLanguage(arguments []string) string {
-	language, _ := parseOSAScriptArguments(arguments)
-	return language
-}
-
-func parseOSAScriptArguments(arguments []string) (string, bool) {
-	language := "applescript"
-	consumesTarget := true
-	for index := 0; index < len(arguments); {
-		argument := arguments[index]
-		switch {
-		case argument == "--":
-			// With no following positional argument, the appended artifact is
-			// the program. Otherwise the first post-- value is already the
-			// program and the appended artifact is only a script argument.
-			return language, consumesTarget && index+1 == len(arguments)
-		case argument == "-i":
-			consumesTarget = false
-			index++
-		case argument == "-l" || argument == "-s" || argument == "-e":
-			if index+1 >= len(arguments) {
-				return "", false
-			}
-			switch argument {
-			case "-l":
-				language = supportedOSALanguage(arguments[index+1])
-				if language == "" {
-					return "", false
-				}
-			case "-s":
-				if !validOSAScriptOutputFlags(arguments[index+1]) {
-					return "", false
-				}
-			case "-e":
-				consumesTarget = false
-			}
-			index += 2
-		case strings.HasPrefix(argument, "-l") && len(argument) > len("-l"):
-			language = supportedOSALanguage(argument[len("-l"):])
-			if language == "" {
-				return "", false
-			}
-			index++
-		case strings.HasPrefix(argument, "-s") && len(argument) > len("-s"):
-			if !validOSAScriptOutputFlags(argument[len("-s"):]) {
-				return "", false
-			}
-			index++
-		case strings.HasPrefix(argument, "-e") && len(argument) > len("-e"):
-			consumesTarget = false
-			index++
-		case strings.HasPrefix(argument, "-"):
-			return "", false
-		default:
-			// The first program file ends osascript option parsing; later values
-			// are script arguments and cannot change the selected language.
-			return language, false
-		}
-	}
-	return language, consumesTarget
-}
-
-func validOSAScriptOutputFlags(value string) bool {
-	if value == "" {
-		return false
-	}
-	for index := 0; index < len(value); index++ {
-		switch value[index] {
-		case 'e', 'h', 'o', 's':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func supportedOSALanguage(value string) string {
-	switch {
-	case strings.EqualFold(value, "javascript"):
-		return "jxa"
-	case strings.EqualFold(value, "applescript"):
-		return "applescript"
-	default:
+	parsed := osacli.Parse(arguments)
+	if parsed.Disposition != osacli.Recognized {
 		return ""
 	}
+	return parsed.Language
 }
 
 // declaredInterpreterName accepts complete, conventional interpreter paths for

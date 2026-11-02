@@ -59,6 +59,10 @@ func TestInterpreterScriptTargets(t *testing.T) {
 		{name: "osascript stdin", exe: "osascript", args: []string{"-l", "JavaScript", "-"}, want: nil},
 		{name: "osascript stdin after delimiter", exe: "osascript", args: []string{"--", "-"}, want: nil},
 		{name: "osascript unknown option is conservative", exe: "osascript", args: []string{"--future-option", "payload.plist"}, want: nil},
+		{name: "osascript interactive loads without executing", exe: "osascript", args: []string{"-i", "payload.scpt"}, want: nil},
+		{name: "osascript unknown language", exe: "osascript", args: []string{"-l", "Ruby", "payload.scpt"}, want: nil},
+		{name: "osascript invalid output flags", exe: "osascript", args: []string{"-s", "x", "payload.scpt"}, want: nil},
+		{name: "osascript unsupported long alias", exe: "osascript", args: []string{"--execute", "return 1", "payload.scpt"}, want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

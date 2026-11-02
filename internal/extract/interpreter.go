@@ -3,6 +3,8 @@ package extract
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/0x4D31/maratus/internal/osacli"
 )
 
 // MaxInterpreterScriptTargets bounds static target enumeration for Node
@@ -642,49 +644,21 @@ func knownShellFlag(tool, arg string) bool {
 }
 
 // osascript accepts one program file followed by arguments for that program.
-// An -e/--execute statement changes those trailing operands into arguments for
+// An -e statement changes those trailing operands into arguments for
 // inline code, so it must not be mistaken for a local file relationship.
 func parseOSAScriptArguments(args []string) interpreterParseResult {
 	result := newInterpreterParseResult()
-	inline := false
-	for index := 0; index < len(args); index++ {
-		if index >= maxInterpreterArgumentTokens {
-			return limitedInterpreterParse(result)
-		}
-		arg := args[index]
-		switch {
-		case arg == "--":
-			if !inline && index+1 < len(args) && args[index+1] != "-" {
-				result.addProgramTarget(args[index+1])
-			}
-			return result
-		case arg == "-":
-			return result
-		case arg == "-e" || arg == "--execute":
-			if index+1 >= len(args) {
-				return malformedInterpreterParse()
-			}
-			inline = true
-			index++
-		case strings.HasPrefix(arg, "-e") && len(arg) > 2:
-			inline = true
-		case arg == "-l" || arg == "-s":
-			if index+1 >= len(args) {
-				return malformedInterpreterParse()
-			}
-			index++
-		case (strings.HasPrefix(arg, "-l") || strings.HasPrefix(arg, "-s")) && len(arg) > 2:
-			continue
-		case arg == "-i":
-			continue
-		case strings.HasPrefix(arg, "-"):
-			return unsupportedInterpreterParse()
-		default:
-			if !inline {
-				result.addProgramTarget(arg)
-			}
-			return result
-		}
+	parsed := osacli.Parse(args)
+	switch parsed.Disposition {
+	case osacli.Unsupported:
+		return unsupportedInterpreterParse()
+	case osacli.Malformed:
+		return malformedInterpreterParse()
+	case osacli.Limited:
+		return limitedInterpreterParse(result)
+	}
+	if parsed.Executes() && parsed.Source == osacli.File {
+		result.addProgramTarget(parsed.Program)
 	}
 	return result
 }
