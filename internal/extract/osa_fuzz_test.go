@@ -3,6 +3,9 @@ package extract
 import (
 	"strings"
 	"testing"
+
+	"github.com/0x4D31/maratus/internal/artifact"
+	"github.com/0x4D31/maratus/internal/behavior"
 )
 
 func FuzzOSAExpression(f *testing.F) {
@@ -28,6 +31,27 @@ func FuzzOSAExpression(f *testing.F) {
 			appleScriptHiddenAnswerDialog(statement)
 			appleScriptHiddenAnswerDialog("display dialog " + statement)
 			appleScriptCommandArgument(statement, "do shell script")
+		}
+	})
+}
+
+func FuzzOSASource(f *testing.F) {
+	for _, source := range []string{
+		"set commandValue to \"printf test\"\ndo shell script commandValue",
+		"on collect()\nset commandValue to \"printf test\"\ndo shell script commandValue\nend collect",
+		`set answer to text returned of (display dialog labelForUser(name) default answer "" with hidden answer)`,
+		"(* nested (* comment *)\ndo shell script \"printf test\"\n*)",
+	} {
+		f.Add(source)
+	}
+	f.Fuzz(func(t *testing.T, source string) {
+		if len(source) > maxOSAExpressionBytes {
+			return
+		}
+		graph := behavior.Graph{EvidenceLimit: 512, ItemLimit: 512, StringByteLimit: 1 << 20}
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+		if len(graph.Operations) > 512 || len(graph.Scopes) > 512 {
+			t.Fatal("OSA source analysis exceeded graph item limits")
 		}
 	})
 }

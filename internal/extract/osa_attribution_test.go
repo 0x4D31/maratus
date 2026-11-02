@@ -233,6 +233,102 @@ func TestOSAMaskedDialogParameters(t *testing.T) {
 	}
 }
 
+func TestOSANestedDialogExpressions(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		want   bool
+	}{
+		{`set answer to text returned of (display dialog (labelForUser(message)) with title titleForUser(name) default answer "" buttons {"OK"} with hidden answer)`, true},
+		{`return text returned of (display dialog "Input" default answer "" with hidden answer)`, true},
+		{`get text returned of (display dialog "Input" default answer "" with hidden answer)`, true},
+		{`set answer to "text returned of (display dialog prompt default answer empty with hidden answer)"`, false},
+		{`set answer to text returned of (display dialog "with hidden answer" default answer "")`, false},
+		{`set answer to text returned of (display dialog "Input" default answer "" with hidden answer) & "trailing data"`, false},
+		{`set answer to text returned of (display dialog (labelForUser(message)) default answer "" with hidden answer`, false},
+	} {
+		var graph behavior.Graph
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(test.source)})
+		got := false
+		for _, op := range graph.Operations {
+			got = got || op.Kind == behavior.OperationCredentialPrompt
+		}
+		if got != test.want {
+			t.Fatalf("prompt=%v want=%v: %s", got, test.want, test.source)
+		}
+	}
+}
+
+func TestOSAHeaderWhitespacePreservesContexts(t *testing.T) {
+	var graph behavior.Graph
+	source := "on\tcollect()\ndo shell script \"printf dormant\"\nend\tcollect\ndo shell script \"printf top\""
+	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	found := false
+	for _, op := range graph.Operations {
+		if op.Line == 2 {
+			found = true
+			if op.SourceFunction != "collect" || op.Execution.Connectivity != behavior.ConnectivityUnknown {
+				t.Fatalf("tab-separated handler lost its context: %#v", op)
+			}
+		}
+		if op.Line == 4 && op.SourceFunction != "" {
+			t.Fatalf("top-level statement inherited the handler: %#v", op)
+		}
+	}
+	if !found {
+		t.Fatal("handler behavior was lost")
+	}
+	var opaque behavior.Graph
+	source = "using\tterms\tfrom application \"Other\"\ndo shell script \"printf unsupported\"\nend\tusing\tterms\tfrom"
+	ExtractText(&opaque, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+	if len(opaque.Operations) != 0 {
+		t.Fatal("tab-separated terminology context acquired local Standard Additions semantics")
+	}
+}
+
+func TestOSAStatementLineEndingsPreserveScopes(t *testing.T) {
+	for _, newline := range []string{"\n", "\r\n", "\r"} {
+		var graph behavior.Graph
+		source := strings.Join([]string{"-- comment \"", "on collect()", `do shell script "printf dormant"`, "end collect", `do shell script "printf top"`}, newline)
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+		found, foundTop := false, false
+		for _, op := range graph.Operations {
+			if op.Line == 3 {
+				found = true
+				if op.SourceFunction != "collect" {
+					t.Fatalf("%q line ending lost the handler context: %#v", newline, op)
+				}
+			}
+			if op.Line == 5 {
+				foundTop = true
+				if op.SourceFunction != "" {
+					t.Fatal("a top-level statement inherited the handler")
+				}
+			}
+		}
+		if !found || !foundTop {
+			t.Fatalf("%q line ending erased supported statements: handler=%v top=%v", newline, found, foundTop)
+		}
+	}
+}
+
+func TestOSAMultilineStringCannotSupplyAStatement(t *testing.T) {
+	for _, newline := range []string{"\n", "\r", "\r\n"} {
+		var graph behavior.Graph
+		source := strings.Join([]string{`set note to "first`, `do shell script \"printf decoy\"`, `last"`, `do shell script "printf top"`}, newline)
+		ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", Data: []byte(source)})
+		found := false
+		for _, op := range graph.Operations {
+			if op.Line != 4 {
+				t.Fatalf("%q string data supplied an operation: %#v", newline, op)
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("%q multiline string erased the following statement", newline)
+		}
+	}
+}
+
 func TestOSAQuotedCommandDataDoesNotBecomeCommunication(t *testing.T) {
 	var graph behavior.Graph
 	ExtractText(&graph, artifact.Content{NodeID: "node-osa", LogicalPath: "fixture.applescript", Kind: "script", MediaType: "text/plain", SemanticLanguage: "applescript", Data: []byte(`do shell script ("printf '%s' " & quoted form of "curl https://example.invalid/decoy")`)})

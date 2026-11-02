@@ -58,6 +58,17 @@ a called cryptographic API proves data transformation support, not ransomware.
 Concrete resource and operation-flow rules remain responsible for those
 stronger conclusions.
 
+AppleScript local string resolution retains exact `set` assignments, immutable
+text aliases, concatenation, parentheses, and `quoted form`, with declaration
+and call evidence. Names are case-insensitive. Unknown writes, opaque calls,
+and context changes invalidate retained local values; persistent property/global
+identifiers and cross-handler propagation remain unresolved. Masked-input
+dialogs support complete bounded result-accessor wrappers and label-call syntax
+without evaluating helpers or inferring their return values. Scoped derived
+handlers that cannot retain valid causal context remain explicitly partial.
+When source encoding is unresolved, only ASCII string operands are resolved;
+legacy Unicode values are not decoded by guesswork.
+
 Endpoint state is intentionally outside this artifact analyzer. Background
 Task Management records, process ancestry, EndpointSecurity events, current
 trust decisions, and other host telemetry can confirm or reject a static
