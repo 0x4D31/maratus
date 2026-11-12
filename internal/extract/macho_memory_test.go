@@ -160,7 +160,7 @@ func TestMachOLinearMemoryWriteBudgetAndAddressOverflowFailClosed(t *testing.T) 
 		{"overflow", func(memory *machoLinearMemory) { memory.store(^uint64(0)-3, 8, true) }},
 		{"budget", func(memory *machoLinearMemory) {
 			for i := 0; i <= maxMachOLinearWrites; i++ {
-				memory.store(0x9000+uint64(i), 1, true)
+				memory.store(0x9000+uint64(i)*2, 1, true)
 			}
 		}},
 	} {
@@ -175,6 +175,135 @@ func TestMachOLinearMemoryWriteBudgetAndAddressOverflowFailClosed(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestMachOLinearMemoryCoalescesExactWrittenIntervals(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		stores, want []machoMemoryRange
+	}{
+		{"nested", []machoMemoryRange{{100, 108}, {102, 104}}, []machoMemoryRange{{100, 108}}},
+		{"overlap out of order", []machoMemoryRange{{108, 116}, {100, 112}}, []machoMemoryRange{{100, 116}}},
+		{"adjacency out of order", []machoMemoryRange{{108, 116}, {100, 108}}, []machoMemoryRange{{100, 116}}},
+		{"new write bridges gap", []machoMemoryRange{{100, 104}, {112, 116}, {104, 112}}, []machoMemoryRange{{100, 116}}},
+		{"unwritten gap remains", []machoMemoryRange{{100, 104}, {108, 112}}, []machoMemoryRange{{100, 104}, {108, 112}}},
+		{"partial bridge leaves gap", []machoMemoryRange{{100, 102}, {105, 107}, {102, 104}}, []machoMemoryRange{{100, 104}, {105, 107}}},
+		{"disjoint insertion is sorted", []machoMemoryRange{{1000, 1004}, {100, 104}, {500, 504}}, []machoMemoryRange{{100, 104}, {500, 504}, {1000, 1004}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			memory := &machoLinearMemory{}
+			written := map[uint64]bool{}
+			for _, store := range test.stores {
+				memory.store(store.start, store.end-store.start, true)
+				for address := store.start; address < store.end; address++ {
+					written[address] = true
+				}
+			}
+			if len(memory.writes) != len(test.want) {
+				t.Fatalf("ranges=%#v, want %#v", memory.writes, test.want)
+			}
+			for i, want := range test.want {
+				if memory.writes[i] != want {
+					t.Fatalf("ranges=%#v, want %#v", memory.writes, test.want)
+				}
+			}
+			for address := uint64(90); address < 1020; address++ {
+				if memory.overwrites(address, 1) != written[address] {
+					t.Fatalf("incorrect byte coverage at %d: %#v", address, memory.writes)
+				}
+			}
+		})
+	}
+}
+
+func TestMachOLinearMemoryBudgetCountsDisjointRegions(t *testing.T) {
+	memory := &machoLinearMemory{}
+	for i := 0; i < maxMachOLinearWrites; i++ {
+		memory.store(0x1000+uint64(i)*16, 8, true)
+	}
+	for i := 0; i < maxMachOLinearWrites*2; i++ {
+		memory.store(0x1001, 1, true)
+	}
+	if memory.truncated || memory.lostWrites || len(memory.writes) != maxMachOLinearWrites {
+		t.Fatal("repeated stores exhausted the region budget")
+	}
+	memory.store(0x1008, 8, true) // Writes the whole gap between the first two regions.
+	if memory.lostWrites || len(memory.writes) != maxMachOLinearWrites-1 {
+		t.Fatal("merging at capacity exhausted the budget")
+	}
+	memory.store(0xf000, 8, true)
+	if memory.lostWrites || len(memory.writes) != maxMachOLinearWrites {
+		t.Fatal("a freed region was not reusable")
+	}
+	memory.store(0xf100, 8, true)
+	if !memory.lostWrites || !memory.truncated || len(memory.writes) != maxMachOLinearWrites {
+		t.Fatal("a genuinely disjoint overflow did not fail closed")
+	}
+	memory.store(0x1008, 8, true)
+	if !memory.lostWrites {
+		t.Fatal("a later merge erased evidence of a lost write extent")
+	}
+	memory.reset()
+	if len(memory.writes) != 0 || memory.unknownWrite || memory.lostWrites || !memory.truncated {
+		t.Fatal("reset did not clear function state while preserving aggregate coverage")
+	}
+}
+
+func TestMachOLostWriteExtentInvalidatesProtectedConcreteBytes(t *testing.T) {
+	file, _ := staticArgvMachOFixture(t, true)
+	addTestMachOReadOnlyMappings(file)
+	index := newMachOSectionIndex(file).withLinearMemory(file)
+	for i := 0; i < maxMachOLinearWrites; i++ {
+		index.memory.store(0x9000+uint64(i)*16, 8, true)
+	}
+	if _, ok := readCStringAtVAIndexed(index, 0x3000, 4096); !ok {
+		t.Fatal("disjoint writes erased protected bytes")
+	}
+	index.memory.store(0x3003, 1, true) // This literal overwrite cannot fit in the region log.
+	if !index.memory.lostWrites {
+		t.Fatal("fixture did not exhaust the region budget")
+	}
+	if _, ok := readCStringAtVAIndexed(index, 0x3000, 4096); ok {
+		t.Fatal("read-only exemption bypassed a lost exact write")
+	}
+}
+
+func FuzzMachOWriteIntervals(f *testing.F) {
+	f.Add([]byte{10, 3, 14, 3, 12, 3, 40, 0})
+	var disjoint []byte
+	for i := 0; i <= maxMachOLinearWrites; i++ {
+		disjoint = append(disjoint, byte(i*2), 0)
+	}
+	f.Add(disjoint)
+	f.Fuzz(func(t *testing.T, data []byte) {
+		memory := &machoLinearMemory{}
+		var written [256]bool
+		lost := false
+		for i := 0; i+1 < min(len(data), 256); i += 2 {
+			start := int(data[i])
+			size := min(int(data[i+1]&15)+1, len(written)-start)
+			memory.store(uint64(start), uint64(size), true)
+			for address := start; address < start+size; address++ {
+				written[address] = true
+			}
+			if len(memory.writes) > maxMachOLinearWrites || lost && !memory.lostWrites || memory.lostWrites && !memory.truncated {
+				t.Fatal("write-region budget or loss latch violated")
+			}
+			for j, interval := range memory.writes {
+				if interval.start >= interval.end || j > 0 && memory.writes[j-1].end >= interval.start {
+					t.Fatal("write intervals are not sorted, disjoint and coalesced")
+				}
+			}
+			lost = memory.lostWrites
+			if !lost {
+				for address, want := range written {
+					if memory.overwrites(uint64(address), 1) != want {
+						t.Fatalf("inexact byte coverage at %d", address)
+					}
+				}
+			}
+		}
+	})
 }
 
 func TestNativeDecodersDoNotResurrectImageArgvAfterStoresOrCalls(t *testing.T) {
@@ -561,7 +690,7 @@ func TestMachOImportBindingRejectsLostWriteExtents(t *testing.T) {
 	lookup := newMachOCallLookup(&graph, artifact.Content{NodeID: "node"}, "x86_64")
 	slots := newMachOImportSlots(map[uint64]string{0x4000: "_execve"}, false)
 	for i := 0; i < maxMachOLinearWrites; i++ {
-		index.memory.store(0x9000+uint64(i)*8, 8, true)
+		index.memory.store(0x9000+uint64(i)*16, 8, true)
 	}
 	if !slots.retained(lookup, index, "_execve") || !machoImportBindingRetained(lookup, index, 0x4000) {
 		t.Fatal("disjoint known writes erased loader metadata")
@@ -597,7 +726,7 @@ func TestObjectiveCSelectorMetadataRetainsRegistrationIdentity(t *testing.T) {
 				index.memory.store(0x3000+uint64(len("fileExistsAtPath:")), 1, true)
 			case "lost write extent":
 				for i := 0; i <= maxMachOLinearWrites; i++ {
-					index.memory.store(0x9000+uint64(i)*8, 8, true)
+					index.memory.store(0x9000+uint64(i)*16, 8, true)
 				}
 			}
 			_, retained := readObjectiveCSelectorRefAtVAIndexed(file, index, 0x2000)

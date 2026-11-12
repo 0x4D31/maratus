@@ -521,19 +521,23 @@ func extractPrivateKeyObservations(graph *behavior.Graph, content artifact.Conte
 		}
 		start := searchAt + relative
 		candidates++
-		limit := min(len(data), start+maxPrivateKeyBytes)
-		block, rest := pem.Decode(data[start:limit])
+		block, consumed, limited := decodeExactPEMSpan(data[start:], maxPrivateKeyBytes)
+		if limited {
+			addPartialCoverageOnce(graph, content.NodeID, "private-key-observations", fmt.Sprintf("private-key candidate scanning capped at %d bytes per candidate", maxPrivateKeyBytes))
+		}
 		if block == nil || !supportedPrivateKeyPEMType(block.Type) {
 			searchAt = start + len(beginMarker)
 			continue
 		}
-		consumed := limit - start - len(rest)
 		if consumed <= 0 {
 			searchAt = start + len(beginMarker)
 			continue
 		}
 		fingerprint, fingerprintKind, valid := privateKeyFingerprint(block)
 		if !valid {
+			if block.Type == "OPENSSH PRIVATE KEY" {
+				addPartialCoverageOnce(graph, content.NodeID, "private-key-observations", "OpenSSH PEM candidate was not promoted: complete OpenSSH private-key validation is unsupported")
+			}
 			searchAt = start + consumed
 			continue
 		}
@@ -554,6 +558,47 @@ func extractPrivateKeyObservations(graph *behavior.Graph, content artifact.Conte
 	if candidates == maxPrivateKeyCandidates && bytes.Contains(data[searchAt:], []byte(beginMarker)) {
 		addPartialCoverageOnce(graph, content.NodeID, "private-key-observations", fmt.Sprintf("private-key candidate scanning capped at %d candidates", maxPrivateKeyCandidates))
 	}
+}
+
+// PEM material in pooled binary data may end immediately before an unrelated
+// constant. Isolate its original marker-delimited bytes before decoding so the
+// footer need not be the end of the surrounding binary line. A nested BEGIN
+// line makes this candidate malformed: pem.Decode must never skip it and
+// silently attribute a later block to this candidate's source offset.
+func decodeExactPEMSpan(data []byte, byteLimit int) (*pem.Block, int, bool) {
+	const beginPrefix = "-----BEGIN "
+	if byteLimit <= 0 {
+		return nil, 0, len(data) != 0
+	}
+	bounded := len(data) > byteLimit
+	data = data[:min(len(data), byteLimit)]
+	if !bytes.HasPrefix(data, []byte(beginPrefix)) {
+		return nil, 0, false
+	}
+	headerEnd := bytes.IndexByte(data, '\n')
+	if headerEnd < 0 {
+		return nil, 0, bounded
+	}
+	header := bytes.TrimRight(bytes.TrimSuffix(data[:headerEnd], []byte{'\r'}), " \t")
+	if !bytes.HasSuffix(header, []byte("-----")) || len(header) <= len(beginPrefix)+5 {
+		return nil, 0, false
+	}
+	blockType := string(header[len(beginPrefix) : len(header)-5])
+	endMarker := []byte("-----END " + blockType + "-----")
+	footer := bytes.Index(data[headerEnd+1:], endMarker)
+	if footer < 0 {
+		return nil, 0, bounded
+	}
+	footer += headerEnd + 1
+	if bytes.Contains(data[1:footer], []byte("\n"+beginPrefix)) {
+		return nil, 0, false
+	}
+	consumed := footer + len(endMarker)
+	block, rest := pem.Decode(data[:consumed])
+	if block == nil || block.Type != blockType || len(rest) != 0 {
+		return nil, 0, false
+	}
+	return block, consumed, false
 }
 
 func supportedPrivateKeyPEMType(keyType string) bool {
@@ -584,11 +629,7 @@ func privateKeyFingerprint(block *pem.Block) (string, string, bool) {
 			}
 		}
 	}
-	if block.Type != "OPENSSH PRIVATE KEY" || !bytes.HasPrefix(block.Bytes, []byte("openssh-key-v1\x00")) {
-		return "", "", false
-	}
-	digest := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(digest[:]), "material-sha256", true
+	return "", "", false
 }
 
 func extractCertificateObservations(graph *behavior.Graph, content artifact.Content, data []byte, method, arch string, byteOffsetBase int64) {
@@ -602,13 +643,14 @@ func extractCertificateObservations(graph *behavior.Graph, content artifact.Cont
 		}
 		start := searchAt + relative
 		candidates++
-		limit := min(len(data), start+maxCertificateBytes)
-		block, rest := pem.Decode(data[start:limit])
+		block, consumed, limited := decodeExactPEMSpan(data[start:], maxCertificateBytes)
+		if limited {
+			addPartialCoverageOnce(graph, content.NodeID, "certificate-observations", fmt.Sprintf("certificate candidate scanning capped at %d bytes per candidate", maxCertificateBytes))
+		}
 		if block == nil || block.Type != "CERTIFICATE" {
 			searchAt = start + len(beginMarker)
 			continue
 		}
-		consumed := limit - start - len(rest)
 		if consumed <= 0 {
 			searchAt = start + len(beginMarker)
 			continue
