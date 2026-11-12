@@ -44,6 +44,12 @@ binding. The HTML overview groups related conclusions compactly; expand a group
 to inspect each rendered instance and open that exact record in the graph.
 Instances excluded by the HTML limits remain in canonical JSON.
 
+Each `conditional_activation` entry links up to eight explicitly connected
+operations by canonical ID. Compare `connected_operation_count` with the list
+length for truncation. Xcode entries retain the declared shell and the phase
+script in `context`; terminal output shows a bounded script excerpt. VS Code
+events come from the declaring extension manifest.
+
 The summary projection categorizes operation-backed matches as `behavior`,
 `technical-primitive`, or `runtime-support`. This is presentation context, not
 a second rule decision. Exact non-runtime Go function identity may also appear

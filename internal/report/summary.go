@@ -496,7 +496,25 @@ func projectBehavior(rep Report) []SummaryBehavior {
 
 // This ordering prioritizes actionable requests, not maliciousness or runtime
 // occurrence. Generic inventory remains present in the projection.
+func nativeUnresolvedInvocation(row SummaryBehavior) bool {
+	if row.Architecture == "" || len(row.Unresolved) == 0 {
+		return false
+	}
+	switch row.Kind {
+	case behavior.OperationProcessExecute, behavior.OperationInterpreterInvoke, behavior.OperationProcessLaunchConfigure:
+		for _, s := range row.Sources {
+			if s.VirtualAddress != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func summaryBehaviorPriority(row SummaryBehavior) int {
+	if nativeUnresolvedInvocation(row) {
+		return 1
+	}
 	concrete := len(row.RequestedArguments) > 0
 	for _, binding := range row.Resources {
 		if binding.Resource.Value != "" && (binding.Resource.Kind == behavior.ResourceFile || binding.Resource.Kind == behavior.ResourceURL || binding.Resource.Kind == behavior.ResourceCommand) {
@@ -917,14 +935,21 @@ func WriteSummaryText(w io.Writer, rep Report, options TextOptions) error {
 		}
 		shown := map[string]bool{}
 		for _, gap := range summary.CoverageGapsAndLimits {
-			if gap.NodeID == "" || (gap.Status != "partial" && gap.Status != "unsupported") || shown[gap.AnalysisArea] || gap.Detail == "" {
+			if gap.NodeID == "" && !strings.HasPrefix(gap.AnalysisArea, "native-source-semantics/") {
+				continue
+			}
+			if (gap.Status != "partial" && gap.Status != "unsupported") || shown[gap.AnalysisArea] || gap.Detail == "" {
 				continue
 			}
 			if len(shown) == 0 {
 				p.section("ANALYSIS LIMITS AT SOURCE", "")
 			}
 			shown[gap.AnalysisArea] = true
-			p.printf("  %s  [%s]\n", boundedText(filepath.Base(paths[gap.NodeID]), 60), gap.NodeID)
+			if gap.NodeID == "" {
+				p.printf("  %s\n", boundedText(gap.AnalysisArea, 70))
+			} else {
+				p.printf("  %s  [%s]\n", boundedText(filepath.Base(paths[gap.NodeID]), 60), gap.NodeID)
+			}
 			for _, line := range conciseWrappedLines(boundedText(gap.Detail, 240), 90) {
 				p.printf("    %s\n", line)
 			}
@@ -1028,7 +1053,7 @@ func (p *presentation) summaryAdditionalBehavior(summary Summary) {
 	}
 	rowsToShow := make([]SummaryBehavior, 0, len(summary.ModeledBehavior))
 	for _, row := range summary.ModeledBehavior {
-		additional := row.Support == behavior.SupportHeuristic || summaryBehaviorHasConcreteResource(row)
+		additional := row.Support == behavior.SupportHeuristic || summaryBehaviorHasConcreteResource(row) || nativeUnresolvedInvocation(row)
 		for _, operationID := range row.OperationIDs {
 			if !matched[operationID] {
 				additional = true
