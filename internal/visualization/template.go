@@ -194,7 +194,7 @@ const htmlSuffix = `</script>
     const network = document.getElementById("review-network"), observables = document.getElementById("review-observables"), coverage = document.getElementById("review-coverage");
     const activations = projection.conditional_activation || [];
     if (!activations.length) reviewEmpty(activation, "No trusted static host-selection or execution-root relationship was established.");
-    activations.forEach(item => addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter], [item.connectivity], {type: item.kind.split(":")[0], id: item.id, count: 1}, "activation"));
+    activations.forEach(item => addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter, ...(item.context || [])], [item.connectivity], {type: item.kind.split(":")[0], id: item.id, count: 1}, "activation"));
     const capabilityItems = projection.capabilities || [], runtimeCapabilityItems = capabilityItems.filter(item => item.category === "runtime-support"), technicalCapabilityItems = capabilityItems.filter(item => item.category === "technical-primitive"), behavioralCapabilityItems = capabilityItems.filter(item => item.category === "behavior");
     if (!behavioralCapabilityItems.length) reviewEmpty(capabilities, capabilityItems.length ? "No higher-level behavioral capability was established. Technical and runtime inventories remain available below." : "No operation-backed capability matches. This is not a safety verdict.");
     document.getElementById("review-capabilities-summary").textContent = behavioralCapabilityItems.length ? countLabel(behavioralCapabilityItems.length, "finding", "findings") : "No higher-level finding established";
@@ -267,7 +267,7 @@ const htmlSuffix = `</script>
   const analysisReported = Object.values(analysis).some(value => value !== false && value !== 0 && value !== "");
   const analysisMode = analysisReported ? [analysis.architecture ? "arch=" + analysis.architecture : "", analysis.include_unreferenced ? "unreferenced content included" : "execution-relevant content", analysis.expand_containers ? "container expansion enabled" : "container expansion disabled", analysis.allow_dmg_mount ? "read-only DMG mounting allowed" : "", analysis.zip_password_supplied ? "ZIP password supplied" : ""].filter(Boolean).join(", ") : "";
   const catalog = data.rule_catalog_digest ? "catalog " + data.rule_catalog_digest.slice(0, 19) : "";
-  document.getElementById("artifact-name").textContent = [data.artifact || "Artifact name not reported", build, commit, data.ruleset_version, catalog, analysisMode].filter(Boolean).join(" · ");
+  document.getElementById("artifact-name").textContent = [projection.artifact_type, projection.selected_members, data.artifact || "Artifact name not reported", build, commit, data.ruleset_version, catalog, analysisMode].filter(Boolean).join(" · ");
 
   function countLabel(value, singular, plural) { return String(value || 0) + " " + ((value || 0) === 1 ? singular : plural); }
   const totalMatches = data.source_counts.capability_matches || 0;

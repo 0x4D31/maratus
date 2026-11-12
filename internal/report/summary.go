@@ -11,7 +11,7 @@ import (
 	"github.com/0x4D31/maratus/internal/behavior"
 )
 
-const SummarySchemaVersion = "maratus.summary.v0.1-preview.9"
+const SummarySchemaVersion = "maratus.summary.v0.1-preview.10"
 
 const maxSummaryCodeContext = 128
 
@@ -50,27 +50,39 @@ type Summary struct {
 }
 
 type SummaryOverview struct {
-	ArtifactNodes       int    `json:"artifact_nodes"`
-	ExecutionRoots      int    `json:"execution_roots"`
-	InvokedTargets      int    `json:"invoked_targets"`
-	Operations          int    `json:"operations"`
-	CapabilityMatches   int    `json:"capability_matches"`
-	Features            int    `json:"features"`
-	CoverageLimitations int    `json:"coverage_limitations"`
-	RootSHA256          string `json:"root_sha256,omitempty"`
-	Notice              string `json:"notice"`
+	ArtifactType        string         `json:"artifact_type"`
+	MemberKinds         map[string]int `json:"member_kinds,omitempty"`
+	ArtifactNodes       int            `json:"artifact_nodes"`
+	ExecutionRoots      int            `json:"execution_roots"`
+	InvokedTargets      int            `json:"invoked_targets"`
+	Operations          int            `json:"operations"`
+	CapabilityMatches   int            `json:"capability_matches"`
+	Features            int            `json:"features"`
+	CoverageLimitations int            `json:"coverage_limitations"`
+	RootSHA256          string         `json:"root_sha256,omitempty"`
+	Notice              string         `json:"notice"`
 }
 
 type SummaryActivation struct {
-	Kind        string                    `json:"kind"`
-	ID          string                    `json:"id"`
-	Name        string                    `json:"name,omitempty"`
-	Interpreter string                    `json:"interpreter,omitempty"`
-	Arguments   []string                  `json:"arguments"`
-	NodeID      string                    `json:"node_id,omitempty"`
-	Source      *behavior.EntityRef       `json:"source,omitempty"`
-	Execution   behavior.ExecutionContext `json:"execution"`
-	EvidenceIDs []string                  `json:"evidence_ids"`
+	DeclarationNodeID string                    `json:"declaration_node_id,omitempty"`
+	StartScopeID      string                    `json:"start_scope_id,omitempty"`
+	EntryPath         string                    `json:"entry_path,omitempty"`
+	Context           []ActivationFact          `json:"context,omitempty"`
+	Kind              string                    `json:"kind"`
+	ID                string                    `json:"id"`
+	Name              string                    `json:"name,omitempty"`
+	Interpreter       string                    `json:"interpreter,omitempty"`
+	Arguments         []string                  `json:"arguments"`
+	NodeID            string                    `json:"node_id,omitempty"`
+	Source            *behavior.EntityRef       `json:"source,omitempty"`
+	Execution         behavior.ExecutionContext `json:"execution"`
+	EvidenceIDs       []string                  `json:"evidence_ids"`
+}
+
+type ActivationFact struct {
+	FeatureID string `json:"feature_id"`
+	Label     string `json:"label"`
+	Value     string `json:"value"`
 }
 
 type SummaryBehavior struct {
@@ -160,13 +172,25 @@ type SummaryCoverage struct {
 }
 
 type SummarySource struct {
-	EvidenceID   string `json:"evidence_id"`
-	NodeID       string `json:"node_id,omitempty"`
-	LogicalPath  string `json:"logical_path,omitempty"`
-	Line         int    `json:"line,omitempty"`
-	ByteOffset   *int64 `json:"byte_offset,omitempty"`
-	Function     string `json:"function,omitempty"`
-	Architecture string `json:"architecture,omitempty"`
+	VirtualAddress uint64 `json:"virtual_address,omitempty"`
+	EvidenceID     string `json:"evidence_id"`
+	NodeID         string `json:"node_id,omitempty"`
+	LogicalPath    string `json:"logical_path,omitempty"`
+	Line           int    `json:"line,omitempty"`
+	ByteOffset     *int64 `json:"byte_offset,omitempty"`
+	Function       string `json:"function,omitempty"`
+	Architecture   string `json:"architecture,omitempty"`
+}
+
+// SelectedMemberTypes summarizes recognized packages, code and opaque disk images.
+func (o SummaryOverview) SelectedMemberTypes() string {
+	var parts []string
+	for _, kind := range []string{"app-bundle", "pkg", "dmg", "macho-fat", "macho", "script", "compiled-applescript", "java-archive", "asar", "carchive"} {
+		if count := o.MemberKinds[kind]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s (%d)", kind, count))
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 func ProjectSummary(rep Report) Summary {
@@ -177,8 +201,8 @@ func ProjectSummary(rep Report) Summary {
 		Overview: SummaryOverview{
 			ArtifactNodes: len(rep.ArtifactNodes), ExecutionRoots: len(rep.ExecutionRoots), InvokedTargets: len(rep.InvokedTargets),
 			Operations: len(rep.Operations), CapabilityMatches: len(rep.Capabilities), Features: len(rep.Features),
-			RootSHA256: presentationRootSHA256(rep),
-			Notice:     "Static analysis only. CONNECTED means statically reachable from a modeled root; it does not mean observed execution or successful effect.",
+			RootSHA256: presentationRootSHA256(rep), ArtifactType: artifactType(rep), MemberKinds: map[string]int{},
+			Notice: "Static analysis only. CONNECTED means statically reachable from a modeled root; it does not mean observed execution or successful effect.",
 		},
 		ConditionalActivation: make([]SummaryActivation, 0, len(rep.ExecutionRoots)+len(rep.InvokedTargets)),
 		ModeledBehavior:       make([]SummaryBehavior, 0), Capabilities: make([]SummaryCapability, 0),
@@ -186,9 +210,42 @@ func ProjectSummary(rep Report) Summary {
 		ArtifactContext:       make([]SummaryArtifactContext, 0),
 		CoverageGapsAndLimits: make([]SummaryCoverage, 0),
 	}
+	paths := make(map[string]string, len(rep.ArtifactNodes))
+	for _, node := range rep.ArtifactNodes {
+		paths[node.ID] = node.LogicalPath
+		if node.ParentID != "" {
+			summary.Overview.MemberKinds[node.Kind]++
+		}
+	}
+	events := map[string][]ActivationFact{}
+	type phaseOwner struct{ root, node, scope string }
+	phases := map[phaseOwner][]ActivationFact{}
+	for _, f := range rep.Features {
+		switch f.Key {
+		case "vscode.extension.activation_event":
+			events[f.NodeID] = append(events[f.NodeID], ActivationFact{f.ID, "Declared activation event", f.Value})
+		case "xcode.build_phase.shell_script":
+			for _, id := range f.Execution.ExecutionRootIDs {
+				owner := phaseOwner{id, f.NodeID, f.ScopeID}
+				phases[owner] = append(phases[owner], ActivationFact{f.ID, "Build target", f.Qualifiers["targets"]}, ActivationFact{f.ID, "Phase script", f.Value})
+				for _, field := range []string{"runOnlyForDeploymentPostprocessing", "alwaysOutOfDate"} {
+					if v := f.Qualifiers[field]; v == "0" || v == "1" {
+						phases[owner] = append(phases[owner], ActivationFact{f.ID, field, v})
+					}
+				}
+			}
+		}
+	}
 	for _, root := range rep.ExecutionRoots {
+		var context []ActivationFact
+		switch root.Kind {
+		case "xcode-run-script":
+			context = phases[phaseOwner{root.ID, root.StartNodeID, root.StartScopeID}]
+		case "vscode-extension-main":
+			context = events[root.DeclarationNodeID]
+		}
 		summary.ConditionalActivation = append(summary.ConditionalActivation, SummaryActivation{
-			Kind: "execution-root:" + root.Kind, ID: root.ID, Name: root.Name, Interpreter: root.Interpreter,
+			DeclarationNodeID: root.DeclarationNodeID, StartScopeID: root.StartScopeID, EntryPath: paths[root.StartNodeID], Context: context, Kind: "execution-root:" + root.Kind, ID: root.ID, Name: root.Name, Interpreter: root.Interpreter,
 			Arguments: nonnilStrings(root.Arguments), NodeID: root.StartNodeID,
 			Execution:   behavior.ExecutionContext{Connectivity: behavior.ConnectivityConnected, ExecutionRootIDs: []string{root.ID}},
 			EvidenceIDs: nonnilStrings(root.EvidenceIDs),
@@ -196,8 +253,12 @@ func ProjectSummary(rep Report) Summary {
 	}
 	for _, target := range rep.InvokedTargets {
 		source := target.Source
+		var context []ActivationFact
+		if target.Kind == "vscode-extension-browser" && source.Kind == behavior.EntityKindArtifactNode {
+			context = events[source.ID]
+		}
 		summary.ConditionalActivation = append(summary.ConditionalActivation, SummaryActivation{
-			Kind: "invoked-target:" + target.Kind, ID: target.ID, Interpreter: target.Interpreter,
+			EntryPath: paths[target.NodeID], StartScopeID: target.ScopeID, Context: context, Kind: "invoked-target:" + target.Kind, ID: target.ID, Interpreter: target.Interpreter,
 			Arguments: nonnilStrings(target.Arguments), NodeID: target.NodeID, Source: &source,
 			Execution: target.Execution, EvidenceIDs: nonnilStrings(target.EvidenceIDs),
 		})
@@ -710,7 +771,7 @@ func sourcesForEvidence(ids []string, index map[string]behavior.Evidence) []Summ
 		if !ok {
 			continue
 		}
-		row := SummarySource{EvidenceID: id, NodeID: evidence.NodeID, LogicalPath: evidence.Logical, Line: evidence.Line, Function: evidence.Function, Architecture: evidence.Arch}
+		row := SummarySource{VirtualAddress: evidence.VA, EvidenceID: id, NodeID: evidence.NodeID, LogicalPath: evidence.Logical, Line: evidence.Line, Function: evidence.Function, Architecture: evidence.Arch}
 		if evidence.ByteOffsetKnown() {
 			offset := evidence.Offset
 			row.ByteOffset = &offset
@@ -800,9 +861,14 @@ func WriteSummaryText(w io.Writer, rep Report, options TextOptions) error {
 	p := newPresentation(w, rep, options)
 	p.header("STATIC ANALYSIS")
 	p.summary()
+	if members := summary.Overview.SelectedMemberTypes(); members != "" {
+		p.keyValue("Contains", members)
+	}
+	if len(summary.ConditionalActivation) > 0 {
+		p.summaryActivation(summary)
+	}
 	p.conciseCapabilities()
 	p.conciseAttack()
-	p.summaryActivation(summary)
 	p.summaryCodeContext(summary)
 	p.summaryAdditionalBehavior(summary)
 	p.conciseNetworkBehavior()
@@ -846,11 +912,25 @@ func (p *presentation) summaryActivation(summary Summary) {
 	for _, item := range summary.ConditionalActivation[:min(len(summary.ConditionalActivation), 12)] {
 		label := strings.TrimPrefix(item.Kind, "execution-root:")
 		label = strings.TrimPrefix(label, "invoked-target:")
-		detail := strings.TrimSpace(strings.Join(append([]string{item.Interpreter}, item.Arguments...), " "))
-		if detail == "" {
-			detail = item.Name
+		args := append([]string{item.Interpreter}, item.Arguments...)
+		for i, arg := range args {
+			if arg == item.EntryPath {
+				if _, member, ok := strings.Cut(arg, "!"); ok {
+					args[i] = member
+				}
+			}
+		}
+		detail := strings.TrimSpace(strings.Join(args, " "))
+		if item.Name != "" && item.Name != detail {
+			detail = strings.TrimSpace(item.Name + "  " + detail)
 		}
 		p.printf("  %-24s  %s  [%s]\n", boundedText(label, 24), boundedText(detail, 66), item.ID)
+		for _, fact := range item.Context[:min(len(item.Context), 6)] {
+			p.printf("    %s  %s  [%s]\n", fact.Label, boundedText(fact.Value, 64), fact.FeatureID)
+		}
+		if len(item.Context) > 6 {
+			p.omitted(len(item.Context)-6, "activation details")
+		}
 	}
 	if len(summary.ConditionalActivation) > 12 {
 		p.omitted(len(summary.ConditionalActivation)-12, "activation paths")
@@ -1025,6 +1105,9 @@ func summaryBehaviorContext(row SummaryBehavior) string {
 	for _, source := range row.Sources {
 		if source.LogicalPath != "" {
 			context = source.LogicalPath
+			if source.VirtualAddress != 0 {
+				context = fmt.Sprintf("evidence %#x · %s · %s", source.VirtualAddress, source.Function, context)
+			}
 			break
 		}
 	}

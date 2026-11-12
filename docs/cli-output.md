@@ -33,7 +33,7 @@ defaults for the installed build.
 
 Human-readable text is bounded and may change for clarity. Do not scrape it as
 an API. JSON is deterministic and contains the complete public report. Summary
-JSON currently uses `maratus.summary.v0.1-preview.9`; consumers must check the
+JSON currently uses `maratus.summary.v0.1-preview.10`; consumers must check the
 version before interpreting projection fields.
 
 Summary JSON retains the producing build, rule catalog digest, and analysis

