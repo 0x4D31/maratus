@@ -105,7 +105,7 @@ func TestRenderOutputValidationAndReplacement(t *testing.T) {
 	if err := run([]string{"render", reportPath, "--format", "html", "-o", output}); err != nil {
 		t.Fatal(err)
 	}
-	assertRenderedHTML(t, output, "maratus.visualization.v0.15")
+	assertRenderedHTML(t, output, "maratus.visualization.v0.16")
 
 	missingParent := filepath.Join(root, "missing", "analysis.html")
 	if err := run([]string{"render", reportPath, "--format", "html", "-o", missingParent}); err == nil || exitCode(err) != 1 {
@@ -214,7 +214,7 @@ func assertRenderedHTML(t *testing.T, path, want string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"<!doctype html>", "maratus.visualization.v0.15", "Content-Security-Policy", want} {
+	for _, marker := range []string{"<!doctype html>", "maratus.visualization.v0.16", "Content-Security-Policy", want} {
 		if !bytes.Contains(data, []byte(marker)) {
 			t.Fatalf("rendered HTML %s missing %q", path, marker)
 		}

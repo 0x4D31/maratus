@@ -9,16 +9,24 @@ entry owns concrete commands and a LaunchDaemon load operation.
 - `logKext-106.pkg` SHA-256: `a8ea6f20ebed0b692773892b5b1e6188087fc0cee3e5df2f25c5a5b9c8dc3c0d`
 - Focused `postinstall` SHA-256: `88a98ca386693b38135205c53e1bba527e0cfd30684d71c463d2370ae1bf73e7`
 - Source: [Objective-See/Malware, pinned revision](https://github.com/objective-see/Malware/blob/16c4f3bf685b1ed95e83d39d6b92c6af64315531/AoboKeylogger%20%28Baoba%29.zip)
-- Analyzer: [Maratus `cf7da12`](https://github.com/0x4D31/maratus/commit/cf7da12c3d3f0c2ea383de2cb085d43d922059a2), default analysis settings.
+- Analyzer: [Maratus `38b6978`](https://github.com/0x4D31/maratus/commit/38b6978697141b34a9c51d1cdf3fa152b6349229), default analysis settings. Terminal output rendered with [`551d6b9`](https://github.com/0x4D31/maratus/commit/551d6b9ddad39c25d822f539b37ab3339b7a13f7).
 
 ## Terminal excerpt
 
-These lines are copied from the terminal report. `[…]` marks omitted lines;
-the tool's own `...` marks truncated display text. Network literals are omitted.
+Selected terminal lines follow. `[…]` marks omissions.
 
 ```text
 Results     242 artifacts · 2 execution roots · 0 invoked targets · 55 matches across 5 capabilities
 Analysis    12 limited scopes; details in canonical JSON or --detail full
+Contains    app-bundle (1), pkg (1), macho-fat (32), script (6)
+
+CONDITIONAL ACTIVATION (2 paths)
+  pkg-script                postinstall AoboKeylogger (Baoba)/AbkPro.app/Contents/Resource...  [root-0001]
+    file.enumerate  CORROBORATED  /System/Library/Extensions/logKext.kext  [operation-0001]
+    process.execute  CORROBORATED  /usr/bin/find argv /System/Library/Extensions/logKe...  [operation-0002]
+    process.execute  CORROBORATED  /sbin/kextunload argv -b com.fsb.kext.logKext  [operation-0003]
+  ... 3 more connected operations (use --format json for the complete report)
+  app-main                  AbkPro AoboKeylogger (Baoba)/AbkPro.app/Contents/MacOS/AbkPro  [root-0002]
 
 CAPABILITIES (4 capabilities · 51 matches)
   CAPABILITY                                                    NAMESPACE
@@ -27,16 +35,6 @@ CAPABILITIES (4 capabilities · 51 matches)
   Executes a concrete file (35 matches)                         macos.execution
   Declares or configures LaunchAgent/LaunchDaem... (6 matches)  macos.persistence
   Match status: execution: 6 connected · 45 unknown; support: 51 corroborated
-[…]
-CONDITIONAL ACTIVATION (2 paths)
-  pkg-script                AoboKeylogger (Baoba).zip!AoboKeylogger (Baoba)/AbkPro.app/Cont...  [root-0001]
-  app-main                  AoboKeylogger (Baoba).zip!AoboKeylogger (Baoba)/AbkPro.app/Cont...  [root-0002]
-[…]
-ADDITIONAL MODELED BEHAVIOR (29 groups)
-  OPERATION                 COUNT  SUPPORT        REACHABILITY  DETAIL
-[…]
-  launchd.job.load              1  CORROBORATED   CONNECTED    /Library/LaunchDaemons/logKext.plist
-                                                               AoboKeylogger (Baoba).zip!AoboKeylogg...
 ```
 
 ## The conditional entry

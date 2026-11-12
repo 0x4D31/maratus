@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -395,6 +396,27 @@ func (p *presentation) conciseObservables() {
 	})
 	p.section("OBSERVABLES", countLabel(len(rows), "static item"))
 	p.printf("  %s  %s\n", p.style.key(fmt.Sprintf("%-30s", "TYPE")), p.style.key("VALUE"))
+	// Show one representative of each host or observable type before
+	// filling the remaining slots with variations from the same group.
+	if len(rows) > conciseObservableLimit {
+		seen := map[string]bool{}
+		first, rest := make([]conciseObservableRow, 0, len(rows)), []conciseObservableRow{}
+		for _, row := range rows {
+			group := row.category
+			if row.category == "URL" {
+				if u, err := url.Parse(row.value); err == nil {
+					group += ":" + strings.ToLower(u.Hostname())
+				}
+			}
+			if seen[group] {
+				rest = append(rest, row)
+				continue
+			}
+			seen[group] = true
+			first = append(first, row)
+		}
+		rows = append(first, rest...)
+	}
 	shown := min(len(rows), conciseObservableLimit)
 	for _, row := range rows[:shown] {
 		value := row.value

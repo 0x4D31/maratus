@@ -186,7 +186,7 @@ const htmlSuffix = `</script>
     if (meta) { const detail = document.createElement("div"); detail.className = "finding-meta"; detail.textContent = meta; item.append(detail); }
     if (query && typeof query === "object") addFindingInstances(item, query);
     else if (query) { const action = document.createElement("button"); action.type = "button"; action.className = "review-action"; action.textContent = "Search related facts"; action.addEventListener("click", () => { search.value = query; setMode("full"); setPage("graph"); }); item.append(action); }
-    container.append(item);
+    container.append(item); return item;
   }
 
   function renderReview() {
@@ -194,7 +194,20 @@ const htmlSuffix = `</script>
     const network = document.getElementById("review-network"), observables = document.getElementById("review-observables"), coverage = document.getElementById("review-coverage");
     const activations = projection.conditional_activation || [];
     if (!activations.length) reviewEmpty(activation, "No trusted static host-selection or execution-root relationship was established.");
-    activations.forEach(item => addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter, ...(item.context || [])], [item.connectivity], {type: item.kind.split(":")[0], id: item.id, count: 1}, "activation"));
+    activations.forEach(item => { const card = addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter, ...(item.context || [])], [item.connectivity], {type: item.kind.split(":")[0], id: item.id, count: 1}, "activation");
+      if (!item.operation_count) return;
+      const list = document.createElement("details"), heading = document.createElement("summary");
+      heading.textContent = countLabel(item.operation_count,"connected operation","connected operations"); list.append(heading);
+      for (const op of item.operations || []) {
+        const node = byRecord.get("operation" + "\u0000" + op.operation_id);
+        const link = document.createElement(node ? "button" : "div");
+        link.textContent = [op.operation_id,op.kind,op.operand,op.support].filter(Boolean).join(" · ");
+        if (node) link.addEventListener("click", () => exploreRecord(node));
+        list.append(link);
+      }
+      if(item.operation_count > item.operations.length) reviewEmpty(list,"Additional operations are retained in canonical JSON.");
+      card.append(list);
+    });
     const capabilityItems = projection.capabilities || [], runtimeCapabilityItems = capabilityItems.filter(item => item.category === "runtime-support"), technicalCapabilityItems = capabilityItems.filter(item => item.category === "technical-primitive"), behavioralCapabilityItems = capabilityItems.filter(item => item.category === "behavior");
     if (!behavioralCapabilityItems.length) reviewEmpty(capabilities, capabilityItems.length ? "No higher-level behavioral capability was established. Technical and runtime inventories remain available below." : "No operation-backed capability matches. This is not a safety verdict.");
     document.getElementById("review-capabilities-summary").textContent = behavioralCapabilityItems.length ? countLabel(behavioralCapabilityItems.length, "finding", "findings") : "No higher-level finding established";
