@@ -229,6 +229,35 @@ func TestNativeDecodersBindStaticArgvAcrossArchitectures(t *testing.T) {
 	})
 }
 
+func TestArm64StaticArgvDoesNotReuseImageBytesAfterAliasStore(t *testing.T) {
+	textVA := uint64(0x100000000)
+	arrayVA := uint64(0x100010000)
+	stringVA := uint64(0x100020000)
+	stubVA := uint64(0x100000100)
+	file, _ := staticArgvMachOFixtureAt(t, true, arrayVA, stringVA)
+	words := []uint32{
+		encodeTestADRP(1, textVA, arrayVA),
+		encodeTestADDImmediate(1, 1, arrayVA&0xfff),
+		0xf900003f, // str xzr, [x1]: overwrites argv[0]
+		encodeTestBL(textVA+12, stubVA),
+	}
+	data := make([]byte, len(words)*4)
+	for index, word := range words {
+		binary.LittleEndian.PutUint32(data[index*4:], word)
+	}
+	text := &macho.Section{SectionHeader: macho.SectionHeader{Seg: "__TEXT", Name: "__text", Addr: textVA, Size: uint64(len(data)), Offset: 0x100}, ReaderAt: bytes.NewReader(data)}
+	file.Sections = append([]*macho.Section{text}, file.Sections...)
+	var graph behavior.Graph
+	extractArm64DirectCalls(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "fixture"}, file, text, data,
+		[]machoFunction{{Name: "main", Start: textVA, End: textVA + uint64(len(data))}}, map[uint64]string{stubVA: "_execve"}, nil, "arm64")
+	if len(graph.Operations) != 1 {
+		t.Fatalf("neutral execve call was lost: %#v", graph.Operations)
+	}
+	if binding, found := graph.Operations[0].FirstBinding(behavior.ResourceRoleArguments); found {
+		t.Fatalf("overwritten image argv was retained: %#v", binding)
+	}
+}
+
 func assertStaticArgvOperation(t *testing.T, count int, operations []behavior.ModeledOperation) {
 	t.Helper()
 	if count != 1 || len(operations) != 1 {

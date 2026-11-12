@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	visualizationSchema = "maratus.visualization.v0.13"
+	visualizationSchema = "maratus.visualization.v0.14"
 	maxReferenceBytes   = 512
 	maxDetailRows       = 20
 	maxListItems        = 12
@@ -76,6 +76,7 @@ type visualProjection struct {
 }
 
 type visualProjectionActivation struct {
+	ID           string `json:"id"`
 	Kind         string `json:"kind"`
 	Name         string `json:"name,omitempty"`
 	Interpreter  string `json:"interpreter,omitempty"`
@@ -83,29 +84,35 @@ type visualProjectionActivation struct {
 }
 
 type visualProjectionBehavior struct {
-	Kind            string   `json:"kind"`
-	Count           int      `json:"count"`
-	OperationIDs    []string `json:"operation_ids"`
-	Support         string   `json:"support"`
-	Connectivity    string   `json:"connectivity"`
-	Resources       []string `json:"resources"`
-	Implementations []string `json:"implementations"`
-	Unresolved      []string `json:"unresolved"`
+	GroupID            string   `json:"group_id"`
+	Kind               string   `json:"kind"`
+	Count              int      `json:"count"`
+	OperationIDs       []string `json:"operation_ids"`
+	Support            string   `json:"support"`
+	Connectivity       string   `json:"connectivity"`
+	Resources          []string `json:"resources"`
+	Implementations    []string `json:"implementations"`
+	RequestedArguments []string `json:"requested_arguments,omitempty"`
+	Unresolved         []string `json:"unresolved"`
 }
 
 type visualProjectionCapability struct {
-	Category        string   `json:"category"`
-	Title           string   `json:"title"`
-	Namespace       string   `json:"namespace,omitempty"`
-	Count           int      `json:"count"`
-	MatchIDs        []string `json:"match_ids"`
-	OperationIDs    []string `json:"operation_ids"`
-	Support         string   `json:"support"`
-	Connectivity    string   `json:"connectivity"`
-	Attack          []string `json:"attack"`
-	Resources       []string `json:"resources"`
-	Implementations []string `json:"implementations"`
-	Unresolved      []string `json:"unresolved"`
+	GroupID               string   `json:"group_id"`
+	RuleID                string   `json:"rule_id"`
+	Category              string   `json:"category"`
+	Title                 string   `json:"title"`
+	Namespace             string   `json:"namespace,omitempty"`
+	Count                 int      `json:"count"`
+	MatchIDs              []string `json:"match_ids"`
+	OperationIDs          []string `json:"operation_ids"`
+	OperationCount        int      `json:"operation_count"`
+	OperationCountLimited bool     `json:"operation_count_limited,omitempty"`
+	Support               string   `json:"support"`
+	Connectivity          string   `json:"connectivity"`
+	Attack                []string `json:"attack"`
+	Resources             []string `json:"resources"`
+	Implementations       []string `json:"implementations"`
+	Unresolved            []string `json:"unresolved"`
 }
 
 type visualProjectionCode struct {
@@ -144,7 +151,16 @@ type visualProjectionCoverage struct {
 }
 
 func boundedVisualProjection(rep report.Report) visualProjection {
+	projection, _ := buildVisualProjection(rep)
+	return projection
+}
+
+// Group membership is retained separately from the bounded display strings.
+// It associates rendered instances with their exact summary row without a
+// textual search or an unbounded list of IDs in the HTML payload.
+func buildVisualProjection(rep report.Report) (visualProjection, map[string]string) {
 	summary := report.ProjectSummary(rep)
+	membership := make(map[string]string)
 	projection := visualProjection{
 		SchemaVersion:         summary.SchemaVersion,
 		ConditionalActivation: make([]visualProjectionActivation, 0, min(len(summary.ConditionalActivation), maxReviewItems)),
@@ -159,19 +175,24 @@ func boundedVisualProjection(rep report.Report) visualProjection {
 	}
 	for _, item := range summary.ConditionalActivation[:min(len(summary.ConditionalActivation), maxReviewItems)] {
 		projection.ConditionalActivation = append(projection.ConditionalActivation, visualProjectionActivation{
+			ID:   terminal.EscapeTruncate(item.ID, maxReferenceBytes),
 			Kind: terminal.EscapeTruncate(item.Kind, maxReferenceBytes), Name: terminal.EscapeTruncate(item.Name, maxReferenceBytes),
 			Interpreter: terminal.EscapeTruncate(item.Interpreter, maxReferenceBytes), Connectivity: terminal.EscapeTruncate(string(item.Execution.Connectivity), maxReferenceBytes),
 		})
 	}
-	for _, item := range summary.ModeledBehavior[:min(len(summary.ModeledBehavior), maxReviewItems)] {
+	for index, item := range summary.ModeledBehavior[:min(len(summary.ModeledBehavior), maxReviewItems)] {
+		group := visualID("behavior-group", index)
+		addReviewMembership(membership, "operation", group, item.OperationIDs)
 		projection.ModeledBehavior = append(projection.ModeledBehavior, visualProjectionBehavior{
-			Kind: terminal.EscapeTruncate(string(item.Kind), maxReferenceBytes), Count: item.Count,
+			GroupID: group,
+			Kind:    terminal.EscapeTruncate(string(item.Kind), maxReferenceBytes), Count: item.Count,
 			OperationIDs: boundedProjectionStrings(item.OperationIDs),
 			Support:      terminal.EscapeTruncate(string(item.Support), maxReferenceBytes), Connectivity: terminal.EscapeTruncate(string(item.Connectivity), maxReferenceBytes),
 			Resources: boundedProjectionResources(item.Resources), Implementations: boundedProjectionStrings(item.Implementations), Unresolved: boundedProjectionStrings(item.Unresolved),
+			RequestedArguments: boundedProjectionStrings(item.RequestedArguments),
 		})
 	}
-	projection.Capabilities = boundedVisualCapabilities(summary.Capabilities)
+	projection.Capabilities = boundedVisualCapabilities(summary.Capabilities, membership)
 	for _, item := range summary.CodeContext[:min(len(summary.CodeContext), maxReviewItems)] {
 		projection.CodeContext = append(projection.CodeContext, visualProjectionCode{
 			Kind: terminal.EscapeTruncate(item.Kind, maxReferenceBytes), Name: terminal.EscapeTruncate(item.Name, maxReferenceBytes),
@@ -208,15 +229,16 @@ func boundedVisualProjection(rep report.Report) visualProjection {
 			Area: terminal.EscapeTruncate(item.AnalysisArea, maxReferenceBytes), Status: terminal.EscapeTruncate(item.Status, maxReferenceBytes), Detail: terminal.EscapeTruncate(item.Detail, maxReferenceBytes),
 		})
 	}
-	return projection
+	return projection, membership
 }
 
-func boundedVisualCapabilities(items []report.SummaryCapability) []visualProjectionCapability {
-	type key struct{ category, title, namespace string }
+func boundedVisualCapabilities(items []report.SummaryCapability, membership map[string]string) []visualProjectionCapability {
+	type key struct{ category, rule, title, namespace string }
 	indexes := make(map[key]int, len(items))
 	rows := make([]visualProjectionCapability, 0, min(len(items), maxReviewItems))
+	operationSets := make([]map[string]struct{}, 0, maxReviewItems)
 	for _, item := range items {
-		identity := key{string(item.Category), item.Title, item.Namespace}
+		identity := key{string(item.Category), item.RuleID, item.Title, item.Namespace}
 		index, exists := indexes[identity]
 		if !exists {
 			if len(rows) == maxReviewItems {
@@ -224,16 +246,33 @@ func boundedVisualCapabilities(items []report.SummaryCapability) []visualProject
 			}
 			index = len(rows)
 			indexes[identity] = index
+			operationSets = append(operationSets, make(map[string]struct{}))
 			rows = append(rows, visualProjectionCapability{
+				GroupID: visualID("capability-group", index), RuleID: terminal.EscapeTruncate(item.RuleID, maxReferenceBytes),
 				Category: terminal.EscapeTruncate(string(item.Category), maxReferenceBytes),
 				Title:    terminal.EscapeTruncate(item.Title, maxReferenceBytes), Namespace: terminal.EscapeTruncate(item.Namespace, maxReferenceBytes),
 				Support: terminal.EscapeTruncate(string(item.Support), maxReferenceBytes), Connectivity: terminal.EscapeTruncate(string(item.Connectivity), maxReferenceBytes),
 			})
 		}
 		row := &rows[index]
+		addReviewMembership(membership, "capability", row.GroupID, item.MatchIDs)
 		row.Count += item.Count
 		row.MatchIDs = appendUniqueProjectionStrings(row.MatchIDs, item.MatchIDs...)
 		row.OperationIDs = appendUniqueProjectionStrings(row.OperationIDs, item.OperationIDs...)
+		for _, id := range item.OperationIDs {
+			if id == "" {
+				continue
+			}
+			if _, exists := operationSets[index][id]; exists {
+				continue
+			}
+			if len(operationSets[index]) == maxReferenceTailScan || len(id) > maxReferenceBytes {
+				row.OperationCountLimited = true
+				continue
+			}
+			operationSets[index][id] = struct{}{}
+		}
+		row.OperationCount = len(operationSets[index])
 		row.Support = joinedProjectionState(row.Support, string(item.Support))
 		row.Connectivity = joinedProjectionState(row.Connectivity, string(item.Connectivity))
 		row.Attack = appendUniqueProjectionStrings(row.Attack, item.Attack...)
@@ -242,6 +281,14 @@ func boundedVisualCapabilities(items []report.SummaryCapability) []visualProject
 		row.Unresolved = appendUniqueProjectionStrings(row.Unresolved, item.Unresolved...)
 	}
 	return rows
+}
+
+func addReviewMembership(membership map[string]string, kind, group string, ids []string) {
+	for _, id := range ids[:min(len(ids), maxReferenceTailScan)] {
+		if id != "" && len(id) <= maxReferenceBytes && len(membership) < maxReferenceTailScan {
+			membership[kind+"\x00"+id] = group
+		}
+	}
 }
 
 func boundedVisualArtifactContext(items []report.SummaryArtifactContext) []visualProjectionArtifact {
@@ -340,6 +387,8 @@ type visualCounts struct {
 
 type visualNode struct {
 	ID           string         `json:"id"`
+	RecordID     string         `json:"record_id,omitempty"`
+	ReviewGroup  string         `json:"review_group,omitempty"`
 	Type         string         `json:"type"`
 	Title        string         `json:"title"`
 	Subtitle     string         `json:"subtitle,omitempty"`
@@ -380,6 +429,9 @@ type documentBuilder struct {
 	executionRootRefs        referenceIndex
 	invokedTargetRefs        referenceIndex
 	operationRefs            referenceIndex
+	capabilityRefs           referenceIndex
+	reviewGroups             map[string]string
+	artifactPaths            map[string]string
 	evidence                 map[string]behavior.Evidence
 	ambiguousEvidence        map[string]struct{}
 	artifactPropertiesByNode map[string][]behavior.ArtifactProperty
@@ -430,6 +482,8 @@ func buildDocument(rep report.Report, options normalizedOptions, adjustments []s
 		executionRootRefs:        newReferenceIndex(),
 		invokedTargetRefs:        newReferenceIndex(),
 		operationRefs:            newReferenceIndex(),
+		capabilityRefs:           newReferenceIndex(),
+		artifactPaths:            make(map[string]string),
 		evidence:                 make(map[string]behavior.Evidence),
 		ambiguousEvidence:        make(map[string]struct{}),
 		artifactPropertiesByNode: make(map[string][]behavior.ArtifactProperty),
@@ -438,13 +492,13 @@ func buildDocument(rep report.Report, options normalizedOptions, adjustments []s
 	}
 	b.doc = visualDocument{
 		SchemaVersion: visualizationSchema,
-		Projection:    boundedVisualProjection(rep),
 		Source:        source,
 		Nodes:         make([]visualNode, 0),
 		Links:         make([]visualLink, 0),
 		Diagnostics:   make([]string, 0),
 		Omissions:     append(make([]string, 0, len(adjustments)), adjustments...),
 	}
+	b.doc.Projection, b.reviewGroups = buildVisualProjection(rep)
 	b.doc.Summary = summarizeReport(rep)
 	title := options.title
 	if title == "" {
@@ -463,6 +517,7 @@ func buildDocument(rep report.Report, options normalizedOptions, adjustments []s
 	b.indexReferences(b.executionRootRefs, "execution-root", min(len(rep.ExecutionRoots), b.options.executionRoots), len(rep.ExecutionRoots), func(i int) string { return rep.ExecutionRoots[i].ID })
 	b.indexReferences(b.invokedTargetRefs, "invoked-target", min(len(rep.InvokedTargets), b.options.invokedTargets), len(rep.InvokedTargets), func(i int) string { return rep.InvokedTargets[i].ID })
 	b.indexReferences(b.operationRefs, "operation", min(len(rep.Operations), b.options.modeledOperations), len(rep.Operations), func(i int) string { return rep.Operations[i].ID })
+	b.indexReferences(b.capabilityRefs, "capability", min(len(rep.Capabilities), b.options.capabilityMatches), len(rep.Capabilities), func(i int) string { return rep.Capabilities[i].ID })
 	b.indexEvidence(rep.Evidence)
 	b.indexArtifactProperty(rep.ArtifactProperties)
 	b.indexNetwork(rep.NetworkImplementations)
@@ -835,6 +890,9 @@ func (b *documentBuilder) addArtifacts(items []artifact.Node) {
 			ID: id, Type: "artifact", Title: b.keep(title), Subtitle: logical,
 			Status: b.keep(item.AnalyzeStatus), Details: details,
 		})
+		if b.artifactRefs.resolved[item.ID] == id {
+			b.artifactPaths[item.ID] = logical
+		}
 	}
 	b.noteLimit("Artifact nodes", limit, len(items), b.options.artifactNodes)
 }
@@ -872,6 +930,7 @@ func (b *documentBuilder) addExecutionRoots(items []behavior.ExecutionRoot) {
 		)
 		b.doc.Nodes = append(b.doc.Nodes, visualNode{
 			ID: visualID("execution-root", i), Type: "execution-root", Title: b.keep(title), Subtitle: b.keep(item.Kind),
+			RecordID:     b.recordID(b.executionRootRefs, item.ID, visualID("execution-root", i)),
 			Connectivity: b.keep(string(behavior.ConnectivityConnected)), Details: details,
 		})
 	}
@@ -893,6 +952,7 @@ func (b *documentBuilder) addInvokedTargets(items []behavior.InvokedTarget) {
 		)
 		b.doc.Nodes = append(b.doc.Nodes, visualNode{
 			ID: visualID("invoked-target", i), Type: "invoked-target", Title: b.keep(title), Subtitle: b.keep(item.Kind),
+			RecordID:     b.recordID(b.invokedTargetRefs, item.ID, visualID("invoked-target", i)),
 			Connectivity: b.keep(string(item.Execution.Connectivity)), Details: details,
 		})
 	}
@@ -907,7 +967,7 @@ func (b *documentBuilder) addOperations(items []behavior.ModeledOperation) {
 		resource := b.resourceBindingsText(item.ResourceBindings)
 		details := []detail{
 			{"Modeled operation ID", item.ID}, {"Kind", string(item.Kind)}, {"Resource bindings", resource},
-			{"Artifact ID", item.SubjectNodeID}, {"Scope ID", item.ScopeID},
+			{"Artifact ID", item.SubjectNodeID}, {"Artifact path", b.artifactPaths[item.SubjectNodeID]}, {"Scope ID", item.ScopeID},
 			{"Support", string(item.Support)}, {"Connectivity", string(item.Execution.Connectivity)},
 			{"Execution root IDs", b.joinStrings(item.Execution.ExecutionRootIDs)}, {"Invoked target IDs", b.joinStrings(item.Execution.InvokedTargetIDs)},
 			{"Source function", item.SourceFunction},
@@ -916,8 +976,10 @@ func (b *documentBuilder) addOperations(items []behavior.ModeledOperation) {
 			{"Evidence locations", b.evidenceText(item.EvidenceIDs)}, {"Evidence IDs", b.joinStrings(item.EvidenceIDs)},
 		}
 		details = append(details, b.qualifierDetails(item.Qualifiers)...)
+		recordID := b.recordID(b.operationRefs, item.ID, id)
 		b.doc.Nodes = append(b.doc.Nodes, visualNode{
 			ID: id, Type: "operation", Title: b.keep(firstNonEmpty(string(item.Kind), "Modeled operation")), Subtitle: b.keep(resource),
+			RecordID: recordID, ReviewGroup: b.reviewGroup("operation", recordID),
 			Support: b.keep(string(item.Support)), Connectivity: b.keep(string(item.Execution.Connectivity)),
 			Details: b.details(details...),
 		})
@@ -940,7 +1002,7 @@ func (b *documentBuilder) addCapabilityMatches(items []behavior.CapabilityMatch)
 		}
 		details := b.details(
 			detail{"Capability match ID", item.ID}, detail{"Rule ID", item.RuleID}, detail{"Namespace", item.Namespace},
-			detail{"Subject artifact ID", item.SubjectNodeID}, detail{"Support", string(item.Support)},
+			detail{"Subject artifact ID", item.SubjectNodeID}, detail{"Artifact path", b.artifactPaths[item.SubjectNodeID]}, detail{"Support", string(item.Support)},
 			detail{"Connectivity", string(item.Execution.Connectivity)}, detail{"Execution root IDs", b.joinStrings(item.Execution.ExecutionRootIDs)},
 			detail{"Invoked target IDs", b.joinStrings(item.Execution.InvokedTargetIDs)}, detail{"Resources", resourceSummary},
 			detail{"Modeled operations", b.joinStrings(item.OperationIDs)},
@@ -949,13 +1011,33 @@ func (b *documentBuilder) addCapabilityMatches(items []behavior.CapabilityMatch)
 			detail{"Architecture scopes", b.joinStrings(item.ArchitectureScopes)},
 			detail{"Match trace", b.matchTraceText(item.MatchTrace)},
 		)
+		recordID := b.recordID(b.capabilityRefs, item.ID, id)
 		b.doc.Nodes = append(b.doc.Nodes, visualNode{
 			ID: id, Type: "capability", Title: b.keep(firstNonEmpty(item.Title, item.RuleID, "Capability match")),
+			RecordID: recordID, ReviewGroup: b.reviewGroup("capability", recordID),
 			Subtitle: b.keep(item.Namespace), Support: b.keep(string(item.Support)),
 			Connectivity: b.keep(string(item.Execution.Connectivity)), Details: details,
 		})
 	}
 	b.noteLimit("Capability matches", limit, len(items), b.options.capabilityMatches)
+}
+
+func (b *documentBuilder) recordID(index referenceIndex, source, visual string) string {
+	if source == "" || index.resolved[source] != visual {
+		return ""
+	}
+	// Escaped or truncated strings remain display data, never record references.
+	if kept := b.keep(source); kept == source {
+		return kept
+	}
+	return ""
+}
+
+func (b *documentBuilder) reviewGroup(kind, recordID string) string {
+	if recordID == "" {
+		return ""
+	}
+	return b.reviewGroups[kind+"\x00"+recordID]
 }
 
 func (b *documentBuilder) matchTraceText(clauses []behavior.MatchTraceClause) string {

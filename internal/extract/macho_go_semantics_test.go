@@ -565,7 +565,9 @@ func goSemanticMachOFixture(literalVA uint64, literal []byte) *macho.File {
 		SectionHeader: macho.SectionHeader{Seg: "__TEXT", Name: "__rodata", Addr: literalVA, Size: uint64(len(literal)), Offset: 0x300},
 		ReaderAt:      bytes.NewReader(literal),
 	}
-	return &macho.File{FileHeader: macho.FileHeader{Magic: macho.Magic64}, ByteOrder: binary.LittleEndian, Sections: []*macho.Section{section}}
+	file := &macho.File{FileHeader: macho.FileHeader{Magic: macho.Magic64}, ByteOrder: binary.LittleEndian, Sections: []*macho.Section{section}}
+	addTestMachOReadOnlyMappings(file)
+	return file
 }
 
 func appendArm64GoString(data []byte, textVA uint64, pointerRegister, lengthRegister uint32, literalVA, length uint64, includeLength bool) []byte {

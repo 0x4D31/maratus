@@ -1449,7 +1449,7 @@ func extractFunctionScopedCalls(graph *behavior.Graph, content artifact.Content,
 	directCount, directTruncated := extractDirectLocalCallsIndexedWithRanges(lookup, file, text, data, functions, importStubs, objcStubs, dataRanges)
 	count += directCount
 	if directTruncated {
-		addPartialCoverageOnce(graph, content.NodeID, "macho-direct-calls/"+arch, fmt.Sprintf("direct call extraction capped at %d code bytes, %d call candidates, %d cumulative Objective-C argument bytes, or the behavior graph work limit", maxMachODirectCallScanBytes, maxMachODirectCallCandidates, maxMachOCFStringBackingBytes))
+		addPartialCoverageOnce(graph, content.NodeID, "macho-direct-calls/"+arch, fmt.Sprintf("direct call extraction capped at %d code bytes, %d call candidates, %d cumulative Objective-C argument bytes, %d image-write ranges per function, or the behavior graph work limit", maxMachODirectCallScanBytes, maxMachODirectCallCandidates, maxMachOCFStringBackingBytes, maxMachOLinearWrites))
 	}
 	boundarySources := make([]string, 0, 3)
 	if goStatus.used {
@@ -3996,7 +3996,7 @@ func x86StringXrefsIndexedBounded(file *macho.File, sections *machoSectionIndex,
 		if err != nil || inst.Len <= 0 || inst.Op == 0 {
 			incomplete = true
 			clearX86AddressState(addressRegisters)
-			i = x86DecodeFailureResumeOffset(textAddr, i, len(data), functions)
+			i = machoNextFunctionOffset(textAddr, i, len(data), functions)
 			continue
 		}
 		next, excluded := machoCodeInstructionExcluded(i, inst.Len, dataRanges)
@@ -4055,7 +4055,7 @@ func x86StringXrefsIndexedBounded(file *macho.File, sections *machoSectionIndex,
 	return out, incomplete
 }
 
-func x86DecodeFailureResumeOffset(textAddr uint64, offset, dataLength int, functions []machoFunction) int {
+func machoNextFunctionOffset(textAddr uint64, offset, dataLength int, functions []machoFunction) int {
 	va := textAddr + uint64(offset)
 	if functionIndex := functionIndexForVA(functions, va); functionIndex >= 0 {
 		end := functions[functionIndex].End
@@ -4750,6 +4750,7 @@ type machoSectionIndex struct {
 	all       machoAddressIndex
 	byName    map[string]*machoAddressIndex
 	imageBase uint64
+	memory    *machoLinearMemory
 }
 
 func newMachOSectionIndex(file *macho.File) *machoSectionIndex {
@@ -4825,14 +4826,22 @@ func (index *machoSectionIndex) containing(va, size uint64) *macho.Section {
 	if index == nil {
 		return nil
 	}
-	return index.all.containing(va, size)
+	section := index.all.containing(va, size)
+	if section == nil || !index.memory.allows(section, va, size) {
+		return nil
+	}
+	return section
 }
 
 func (index *machoSectionIndex) namedContaining(va, size uint64, name string) *macho.Section {
 	if index == nil {
 		return nil
 	}
-	return index.byName[name].containing(va, size)
+	section := index.byName[name].containing(va, size)
+	if section == nil || !index.memory.allows(section, va, size) {
+		return nil
+	}
+	return section
 }
 
 func machoSectionHasFileData(section *macho.Section) bool {
@@ -5095,9 +5104,9 @@ func newMachOCFStringReader(index *machoSectionIndex, byteLimit uint64) *machoCF
 func (reader *machoCFStringReader) read(pointer, length uint64) (string, uint64, int, bool) {
 	key := machoCFStringReadKey{pointer: pointer, length: length}
 	if result, ok := reader.cache[key]; ok {
-		return result.value, result.va, result.offset, result.ok
+		return reader.retainedResult(result, length)
 	}
-	if length == 0 || length > maxMachOASCIIStringBytes {
+	if reader.index == nil || length == 0 || length > maxMachOASCIIStringBytes {
 		reader.cache[key] = machoCFStringReadResult{}
 		return "", 0, 0, false
 	}
@@ -5112,10 +5121,22 @@ func (reader *machoCFStringReader) read(pointer, length uint64) (string, uint64,
 		return "", 0, 0, false
 	}
 	reader.bytesRemaining -= length * uint64(len(candidates))
-	value, va, offset, ok := readExactStringAtPointerLocationIndexed(reader.index, pointer, length)
+	// Cache the original image parse, independently of the current linear
+	// write guard. Every use is revalidated, so disjoint stores and function
+	// boundaries do not repeatedly charge immutable backing bytes.
+	imageIndex := *reader.index
+	imageIndex.memory = nil
+	value, va, offset, ok := readExactStringAtPointerLocationIndexed(&imageIndex, pointer, length)
 	result := machoCFStringReadResult{value: value, va: va, offset: offset, ok: ok}
 	reader.cache[key] = result
-	return result.value, result.va, result.offset, result.ok
+	return reader.retainedResult(result, length)
+}
+
+func (reader *machoCFStringReader) retainedResult(result machoCFStringReadResult, length uint64) (string, uint64, int, bool) {
+	if !result.ok || reader.index.containing(result.va, length) == nil {
+		return "", 0, 0, false
+	}
+	return result.value, result.va, result.offset, true
 }
 
 // readExactStringAtPointerLocationIndexed reads a validated length-delimited
@@ -5172,6 +5193,9 @@ func readMachOCStringAtVAIndexed(index *machoSectionIndex, va, maxLen uint64, al
 	if end < 0 {
 		// A section boundary does not prove a C-string terminator. Raw string
 		// observations may retain these bytes, but exact call operands may not.
+		return "", false
+	}
+	if index.containing(va, uint64(end)+1) == nil {
 		return "", false
 	}
 	value := string(window[:end])
@@ -5236,8 +5260,10 @@ func extractX86DirectCallsIndexed(lookup *machoCallLookup, file *macho.File, tex
 
 func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho.File, text *macho.Section, data []byte, functions []machoFunction, importStubs, objcStubs map[uint64]string, byteLimit, candidateLimit int, dataRanges []machoCodeRange) (int, bool) {
 	data, truncated := boundedMachOCallData(data, byteLimit)
-	sections := lookup.sectionIndexFor(file)
+	sections := lookup.sectionIndexFor(file).withLinearMemory(file)
+	stubRanges := stubSections(file)
 	importPointers, importPointersTruncated := importedPointerMapForLookup(file, lookup, maxMachOStubRecords)
+	importSlots := newMachOImportSlots(importPointers, importPointersTruncated || lookup.dyldIncomplete)
 	if importPointersTruncated {
 		addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-stubs/"+lookup.arch, fmt.Sprintf("stub and indirect-symbol-pointer extraction capped at %d records", maxMachOStubRecords))
 	}
@@ -5254,6 +5280,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 	stackAddresses := map[uint8]machoStackAddressValue{}
 	stackSlots := map[int64]machoObjCStackSlot{}
 	var pendingGoLaunch *machoGoLaunchConfiguration
+	previousCall := false
 	currentFunction := -2
 	for i := 0; i < len(data); {
 		if i&0xfff == 0 && lookup.graph.WorkLimitReached() {
@@ -5265,6 +5292,8 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			pendingGoLaunch = nil
 		}
 		if functionIndex := functionIndexForVA(functions, va); functionIndex != currentFunction {
+			sections.memory.reset()
+			previousCall = false
 			clearX86RegisterState(stringRegisters, selectorRegisters)
 			clearX86AddressState(addressRegisters)
 			clearMachOIntegerState(integerRegisters)
@@ -5276,7 +5305,12 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			pendingGoLaunch = nil
 			currentFunction = functionIndex
 		}
+		if previousCall {
+			sections.memory.callBoundary = true
+			previousCall = false
+		}
 		if dataRange, excluded := machoCodeRangeContaining(i, dataRanges); excluded {
+			sections.memory.store(0, 0, false)
 			clearX86RegisterState(stringRegisters, selectorRegisters)
 			clearX86AddressState(addressRegisters)
 			clearMachOIntegerState(integerRegisters)
@@ -5291,6 +5325,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 		}
 		inst, err := decodeX86Instruction(x86DecodeInput(data, text.Addr, i, functions, dataRanges))
 		if err != nil || inst.Len <= 0 || inst.Op == 0 {
+			sections.memory.store(0, 0, false)
 			addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-x86-direct-call-decode/"+lookup.arch, "x86_64 direct-call decoding stopped at the first undecodable instruction in each affected recovered function; no byte resynchronization was attempted")
 			clearX86RegisterState(stringRegisters, selectorRegisters)
 			clearX86AddressState(addressRegisters)
@@ -5301,11 +5336,12 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			clearMachOStackAddressState(stackAddresses)
 			clearMachOObjCStackSlots(stackSlots)
 			pendingGoLaunch = nil
-			i = x86DecodeFailureResumeOffset(text.Addr, i, len(data), functions)
+			i = machoNextFunctionOffset(text.Addr, i, len(data), functions)
 			continue
 		}
 		next, excluded := machoCodeInstructionExcluded(i, inst.Len, dataRanges)
 		if excluded {
+			sections.memory.store(0, 0, false)
 			clearX86RegisterState(stringRegisters, selectorRegisters)
 			clearX86AddressState(addressRegisters)
 			clearMachOIntegerState(integerRegisters)
@@ -5319,6 +5355,13 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			continue
 		}
 		instruction := data[i : i+inst.Len]
+		if sections.memory.overwrites(va, uint64(inst.Len)) {
+			addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-modified-code/"+lookup.arch, "linear call recognition stopped in a recovered function after an exact store into subsequently decoded instruction bytes or an imported stub")
+			i = machoNextFunctionOffset(text.Addr, i, len(data), functions)
+			continue
+		}
+		previousCall = inst.Op == x86asm.CALL
+		sections.memory.x86Store(inst, va, i, addressRegisters)
 		if target, reg, size, loadsMemory, ok := x86RIPRelativeTargetAndReg(va, instruction); ok && size == inst.Len {
 			delete(integerRegisters, reg)
 			delete(objcReceivers, reg)
@@ -5339,7 +5382,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 				delete(stringRegisters, reg)
 			}
 			if loadsMemory {
-				if symbol := importPointers[target]; symbol != "" {
+				if symbol := importPointers[target]; symbol != "" && machoImportBindingRetained(lookup, sections, target) {
 					importPointerRegisters[reg] = x86ImportedPointerValue{Symbol: symbol, SlotVA: target, Instruction: i}
 					if class, ok := objcClassNameFromImportedSymbol(symbol); ok {
 						objcClasses[reg] = machoObjCClassValue{Name: class, Instruction: i, ReferenceVA: va, ReferenceOff: int(text.Offset) + i, SlotVA: target}
@@ -5384,7 +5427,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 					delete(stringRegisters, dst)
 				}
 				if loadsMemory {
-					if symbol := importPointers[target]; symbol != "" {
+					if symbol := importPointers[target]; symbol != "" && machoImportBindingRetained(lookup, sections, target) {
 						importPointerRegisters[dst] = x86ImportedPointerValue{Symbol: symbol, SlotVA: target, Instruction: i}
 						if class, ok := objcClassNameFromImportedSymbol(symbol); ok {
 							objcClasses[dst] = machoObjCClassValue{Name: class, Instruction: i, ReferenceVA: va, ReferenceOff: int(text.Offset) + i, SlotVA: target}
@@ -5429,7 +5472,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			target = uint64(int64(va+5) + rel)
 			callSize = 5
 		} else if inst.Op == x86asm.CALL {
-			if pointerVA, ok := x86RIPRelativeIndirectCallPointer(va, instruction); ok && importPointers[pointerVA] != "" {
+			if pointerVA, ok := x86RIPRelativeIndirectCallPointer(va, instruction); ok && importPointers[pointerVA] != "" && machoImportBindingRetained(lookup, sections, pointerVA) {
 				target = pointerVA
 				calledSymbols = importPointers
 				callSize = inst.Len
@@ -5443,6 +5486,9 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 					indirectImportCall = true
 				}
 			}
+		}
+		if directRelativeCall && !importSlots.retained(lookup, sections, importStubs[target]) {
+			callSize = 0
 		}
 		if callSize == 0 {
 			if register, offset, size, ok := x86FrameRelativeLEA(instruction); ok && size == inst.Len {
@@ -5514,7 +5560,9 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			clearX86RegisterState(stringRegisters, selectorRegisters)
 			clearX86AddressState(addressRegisters)
 			clearMachOIntegerState(integerRegisters)
-			clearX86ImportedPointerState(importPointerRegisters)
+			if _, memoryDestination := inst.Args[0].(x86asm.Mem); inst.Op != x86asm.MOV || !memoryDestination {
+				clearX86ImportedPointerState(importPointerRegisters)
+			}
 			clearMachOObjCReceiverState(objcReceivers)
 			clearMachOObjCClassState(objcClasses)
 			clearMachOStackAddressState(stackAddresses)
@@ -5524,6 +5572,11 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 			continue
 		}
 		callVA := va
+		if !indirectImportCall && (calledSymbols[target] != "" || objcStubs[target] != "") && machoImportStubOverwritten(sections.memory, stubRanges, target) {
+			addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-modified-code/"+lookup.arch, "linear call recognition stopped in a recovered function after an exact store into subsequently decoded instruction bytes or an imported stub")
+			i = machoNextFunctionOffset(text.Addr, i, len(data), functions)
+			continue
+		}
 		if candidates >= candidateLimit {
 			return count, true
 		}
@@ -5535,11 +5588,12 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 		}
 		goContext := x86GoCallContext(sections, text.Offset, text.Addr, i, addressRegisters, integerRegisters)
 		if pendingGoLaunch != nil {
-			if directRelativeCall && callee.Start == target {
+			if directRelativeCall && callee.Start == target && sections.containing(pendingGoLaunch.literalVA, uint64(len(pendingGoLaunch.executable))) != nil {
 				addGoImmediateLaunchExecutionIndexed(lookup, pendingGoLaunch, caller, callee, callVA)
 			}
 			pendingGoLaunch = nil
 		}
+		invalidateMachOCachedImageArguments(lookup, sections, objcReceivers, stackSlots)
 		objcContext := machoCallContext{}
 		ownershipInput := objcReceivers[7]
 		allocationClass := objcClasses[7]
@@ -5588,7 +5642,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 		// registers. Retain only fresh, exactly recovered C-string values.
 		for position, register := range [...]uint8{7, 6, 2, 1, 8, 9} {
 			argument := stringRegisters[register]
-			if argument.value == "" || i-argument.instruction > 96 {
+			if argument.value == "" || i-argument.instruction > 96 || sections.containing(argument.literalVA, uint64(len(argument.value))+1) == nil {
 				continue
 			}
 			context.setStringArgument(position, machoCallStringArgument{
@@ -5684,7 +5738,7 @@ func extractX86DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho
 		}
 		i += callSize
 	}
-	return count, truncated || objcStrings.truncated
+	return count, truncated || objcStrings.truncated || sections.memory.truncated
 }
 
 func clearX86RegisterState(strings map[uint8]x86StringValue, selectors map[uint8]x86SelectorValue) {
@@ -5897,8 +5951,10 @@ func extractArm64DirectCallsIndexed(lookup *machoCallLookup, file *macho.File, t
 
 func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *macho.File, text *macho.Section, data []byte, functions []machoFunction, importStubs, objcStubs map[uint64]string, byteLimit, candidateLimit int, dataRanges []machoCodeRange) (int, bool) {
 	data, truncated := boundedMachOCallData(data, byteLimit)
-	sections := lookup.sectionIndexFor(file)
+	sections := lookup.sectionIndexFor(file).withLinearMemory(file)
+	stubRanges := stubSections(file)
 	importPointers, importPointersTruncated := importedPointerMapForLookup(file, lookup, maxMachOStubRecords)
+	importSlots := newMachOImportSlots(importPointers, importPointersTruncated || lookup.dyldIncomplete)
 	if importPointersTruncated {
 		addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-stubs/"+lookup.arch, fmt.Sprintf("stub and indirect-symbol-pointer extraction capped at %d records", maxMachOStubRecords))
 	}
@@ -5914,6 +5970,7 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 	stackAddresses := map[uint32]machoStackAddressValue{}
 	stackSlots := map[int64]machoObjCStackSlot{}
 	var pendingGoLaunch *machoGoLaunchConfiguration
+	previousCall := false
 	currentFunction := -2
 	for i := 0; i+4 <= len(data); i += 4 {
 		if i&0xfff == 0 && lookup.graph.WorkLimitReached() {
@@ -5925,6 +5982,8 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			pendingGoLaunch = nil
 		}
 		if functionIndex := functionIndexForVA(functions, va); functionIndex != currentFunction {
+			sections.memory.reset()
+			previousCall = false
 			clearArm64RegisterState(registers, selectors)
 			clearMachOIntegerState(integerRegisters)
 			clearMachOObjCReceiverState(objcReceivers)
@@ -5935,7 +5994,12 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			pendingGoLaunch = nil
 			currentFunction = functionIndex
 		}
+		if previousCall {
+			sections.memory.callBoundary = true
+			previousCall = false
+		}
 		if _, excluded := machoCodeInstructionExcluded(i, 4, dataRanges); excluded {
+			sections.memory.store(0, 0, false)
 			clearArm64RegisterState(registers, selectors)
 			clearMachOIntegerState(integerRegisters)
 			clearMachOObjCReceiverState(objcReceivers)
@@ -5946,7 +6010,14 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			pendingGoLaunch = nil
 			continue
 		}
+		if sections.memory.overwrites(va, 4) {
+			addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-modified-code/"+lookup.arch, "linear call recognition stopped in a recovered function after an exact store into subsequently decoded instruction bytes or an imported stub")
+			i = machoNextFunctionOffset(text.Addr, i, len(data), functions) - 4
+			continue
+		}
 		insn := file.ByteOrder.Uint32(data[i : i+4])
+		previousCall = insn&0xfc000000 == 0x94000000 || insn&0xfffffc1f == 0xd63f0000
+		sections.memory.arm64Store(insn, i, registers, stackAddresses)
 		if destination, ok := arm64FrameAddressDestination(insn); ok {
 			delete(registers, destination)
 			delete(integerRegisters, destination)
@@ -6081,7 +6152,7 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			delete(integerRegisters, rt)
 			delete(objcReceivers, rt)
 			delete(stackAddresses, rt)
-			if class, ok := objcClassNameFromImportedSymbol(importPointers[pointerVA]); ok {
+			if class, ok := objcClassNameFromImportedSymbol(importPointers[pointerVA]); ok && machoImportBindingRetained(lookup, sections, pointerVA) {
 				objcClasses[rt] = machoObjCClassValue{Name: class, Instruction: i, ReferenceVA: va, ReferenceOff: int(text.Offset) + i, SlotVA: pointerVA}
 			} else {
 				delete(objcClasses, rt)
@@ -6098,7 +6169,7 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			delete(integerRegisters, rt)
 			delete(objcReceivers, rt)
 			delete(stackAddresses, rt)
-			if class, ok := objcClassNameFromImportedSymbol(importPointers[pointerVA]); ok {
+			if class, ok := objcClassNameFromImportedSymbol(importPointers[pointerVA]); ok && machoImportBindingRetained(lookup, sections, pointerVA) {
 				objcClasses[rt] = machoObjCClassValue{Name: class, Instruction: i, ReferenceVA: va, ReferenceOff: int(text.Offset) + i, SlotVA: pointerVA}
 			} else {
 				delete(objcClasses, rt)
@@ -6172,6 +6243,11 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			// Unknown instructions are a data-flow boundary. Clear every inferred
 			// value rather than assuming the low five bits identify the only
 			// destination register.
+			if insn&0x0a000000 == 0x08000000 && !arm64ImmediateStackMemory(insn) {
+				// An unmodeled load/store-class instruction may write through an
+				// alias. Do not resurrect image operands after registers reset.
+				sections.memory.store(0, 0, false)
+			}
 			clearArm64RegisterState(registers, selectors)
 			clearMachOIntegerState(integerRegisters)
 			clearMachOObjCReceiverState(objcReceivers)
@@ -6185,6 +6261,22 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 		imm := int32(insn&0x03ffffff) << 6 >> 4
 		callVA := va
 		target := uint64(int64(va) + int64(imm))
+		if !importSlots.retained(lookup, sections, importStubs[target]) {
+			clearArm64RegisterState(registers, selectors)
+			clearMachOIntegerState(integerRegisters)
+			clearMachOObjCReceiverState(objcReceivers)
+			clearMachOObjCClassState(objcClasses)
+			clear(objcReceiverStackSlots)
+			clearMachOStackAddressState(stackAddresses)
+			clearMachOObjCStackSlots(stackSlots)
+			pendingGoLaunch = nil
+			continue
+		}
+		if (importStubs[target] != "" || objcStubs[target] != "") && machoImportStubOverwritten(sections.memory, stubRanges, target) {
+			addPartialCoverageOnce(lookup.graph, lookup.content.NodeID, "macho-modified-code/"+lookup.arch, "linear call recognition stopped in a recovered function after an exact store into subsequently decoded instruction bytes or an imported stub")
+			i = machoNextFunctionOffset(text.Addr, i, len(data), functions) - 4
+			continue
+		}
 		if candidates >= candidateLimit {
 			return count, true
 		}
@@ -6193,11 +6285,12 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 		callee := functionForVA(functions, target)
 		goContext := arm64GoCallContext(sections, text.Offset, text.Addr, i, registers, integerRegisters)
 		if pendingGoLaunch != nil {
-			if callee.Start == target {
+			if callee.Start == target && sections.containing(pendingGoLaunch.literalVA, uint64(len(pendingGoLaunch.executable))) != nil {
 				addGoImmediateLaunchExecutionIndexed(lookup, pendingGoLaunch, caller, callee, callVA)
 			}
 			pendingGoLaunch = nil
 		}
+		invalidateMachOCachedImageArguments(lookup, sections, objcReceivers, stackSlots)
 		objcContext := machoCallContext{}
 		ownershipInput := objcReceivers[0]
 		allocationClass := objcClasses[0]
@@ -6325,7 +6418,7 @@ func extractArm64DirectCallsIndexedWithRanges(lookup *machoCallLookup, file *mac
 			objcReceivers[0] = swiftObjCReceiver
 		}
 	}
-	return count, truncated || objcStrings.truncated
+	return count, truncated || objcStrings.truncated || sections.memory.truncated
 }
 
 func arm64BreaksLinearState(insn uint32) bool {
@@ -6838,6 +6931,21 @@ func readObjectiveCSelectorRefAtVA(file *macho.File, va uint64) (string, bool) {
 }
 
 func readObjectiveCSelectorRefAtVAIndexed(file *macho.File, sections *machoSectionIndex, va uint64) (string, bool) {
+	if sections == nil {
+		return "", false
+	}
+	memory := sections.memory
+	if memory != nil {
+		if memory.lostWrites || memory.overwrites(va, 8) {
+			return "", false
+		}
+		// SEL identity follows Objective-C registration metadata. Unresolved
+		// stores or ordinary calls do not prove rebinding; concrete argument
+		// bytes remain subject to the separate mutable-image read guard.
+		imageIndex := *sections
+		imageIndex.memory = nil
+		sections = &imageIndex
+	}
 	section := sections.namedContaining(va, 8, "__objc_selrefs")
 	if section == nil || section.Flags&0xff != 0x5 || !objectiveCDataSegment(section.Seg) { // S_LITERAL_POINTERS
 		return "", false
@@ -6847,8 +6955,8 @@ func readObjectiveCSelectorRefAtVAIndexed(file *macho.File, sections *machoSecti
 		return "", false
 	}
 	pointer := file.ByteOrder.Uint64(data)
-	selector, ok := readCStringAtPointerIndexed(file, sections, pointer, 256)
-	if !ok || !looksObjectiveCSelector(selector) {
+	selector, selectorVA, _, ok := readCStringAtPointerLocationIndexed(file, sections, pointer, 256)
+	if !ok || !looksObjectiveCSelector(selector) || memory != nil && memory.overwrites(selectorVA, uint64(len(selector))+1) {
 		return "", false
 	}
 	return selector, true
@@ -7031,7 +7139,7 @@ func x86LocalCallEdgesBoundedWithRangesDetailed(textAddr uint64, data []byte, fu
 		inst, err := decodeX86Instruction(x86DecodeInput(data, textAddr, i, functions, dataRanges))
 		if err != nil || inst.Len <= 0 || inst.Op == 0 {
 			decodeIncomplete = true
-			i = x86DecodeFailureResumeOffset(textAddr, i, len(data), functions)
+			i = machoNextFunctionOffset(textAddr, i, len(data), functions)
 			continue
 		}
 		next, excluded := machoCodeInstructionExcluded(i, inst.Len, dataRanges)

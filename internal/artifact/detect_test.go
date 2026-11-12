@@ -1,12 +1,60 @@
 package artifact
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestDetectTarRequiresHeaderChecksum(t *testing.T) {
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if err := writer.WriteHeader(&tar.Header{Name: "entry.txt", Mode: 0600, Size: 0, Format: tar.FormatUSTAR}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	valid := archive.Bytes()
+	nulTerminated := bytes.Clone(valid)
+	nulTerminated[155] = 'X' // archive/tar ignores padding after the first NUL.
+	signed := bytes.Clone(valid)
+	signed[0] = 0xff
+	var checksum int
+	for i, value := range signed[:512] {
+		if i >= 148 && i < 156 {
+			value = ' '
+		}
+		checksum += int(int8(value))
+	}
+	copy(signed[148:156], fmt.Sprintf("%06o\x00 ", checksum))
+	for _, data := range [][]byte{valid, signed, nulTerminated} {
+		if _, err := tar.NewReader(bytes.NewReader(data)).Next(); err != nil {
+			t.Fatalf("control header rejected by archive/tar: %v", err)
+		}
+		if kind, _ := Detect("misleading.js", data, false); kind != "tar" {
+			t.Fatalf("valid tar header detected as %q", kind)
+		}
+	}
+	lookalike := []byte("//" + strings.Repeat(" ", 255) + "ustar\n" + strings.Repeat(" ", 256))
+	if kind, _ := Detect("source.js", lookalike, false); kind != "script" {
+		t.Fatalf("incidental tar magic hid JavaScript as %q", kind)
+	}
+	corrupt := bytes.Clone(valid)
+	corrupt[0] ^= 1
+	for _, data := range [][]byte{valid[:262], corrupt, append([]byte(nil), lookalike[:262]...)} {
+		if hasTarMagic(data) {
+			t.Fatal("truncated or invalid first header accepted")
+		}
+	}
+	if kind, _ := Detect("damaged.tar", corrupt, false); kind != "tar" {
+		t.Fatalf("explicit binary tar candidate lost archive coverage: %q", kind)
+	}
+}
 
 func TestDetectCompiledAppleScriptByMagic(t *testing.T) {
 	for _, data := range [][]byte{

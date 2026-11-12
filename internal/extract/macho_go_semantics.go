@@ -11,7 +11,7 @@ import (
 
 const maxMachOGoABIStringBytes = 4096
 
-const machoGoSemanticCoverageDetail = "bounded ABIInternal pointer/length recovery is supported for exact static strings at selected direct Go standard-library calls; interfaces, slices and variadic argv, closures, indirect or dynamic calls, interprocedural values, stack spills, branches, and general control flow remain unsupported"
+const machoGoSemanticCoverageDetail = "bounded ABIInternal pointer/length recovery is supported for exact static strings at selected direct Go standard-library calls; mutable image operands after calls or possibly aliasing stores, interfaces, slices and variadic argv, closures, indirect or dynamic calls, interprocedural values, stack spills, branches, and general control flow remain unsupported"
 
 // machoGoStringArgument is an exact ABIInternal string value recovered at one
 // direct Go callsite. Go strings are pointer/length pairs and are deliberately
@@ -108,6 +108,7 @@ var machoGoUnaryCallSpecs = map[string]machoGoUnaryCallSpec{
 type machoGoLaunchConfiguration struct {
 	caller              machoFunction
 	executable          string
+	literalVA           uint64
 	operationID         string
 	evidenceIDs         []string
 	resourceEvidenceIDs []string
@@ -186,7 +187,7 @@ func addGoLocalCallSemanticsIndexed(lookup *machoCallLookup, caller, callee mach
 		if operationID == "" {
 			return nil
 		}
-		return &machoGoLaunchConfiguration{caller: caller, executable: argument.Value, operationID: operationID, evidenceIDs: evidenceIDs, resourceEvidenceIDs: argumentEvidence, nextOffset: nextOffset}
+		return &machoGoLaunchConfiguration{caller: caller, executable: argument.Value, literalVA: argument.LiteralVA, operationID: operationID, evidenceIDs: evidenceIDs, resourceEvidenceIDs: argumentEvidence, nextOffset: nextOffset}
 	}
 	if callee.Name == "net.Dial" || callee.Name == "net.DialTimeout" {
 		return addGoDialOperationIndexed(lookup, caller, callee, callVA, &context)
