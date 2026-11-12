@@ -8,23 +8,24 @@ the binary's native API inventory.
 - Archive SHA-256: `327dc7e90ce3570f30915c9943b33aadd96ef4994a4a669d533b0e8daec04de4`
 - Script SHA-256: `393acc8ef94ab8ba0abf7a769e451d5434d4acdbda0b60966bfac4b40e4d6875`
 - Source: [Objective-See/Malware, pinned revision](https://github.com/objective-see/Malware/blob/16c4f3bf685b1ed95e83d39d6b92c6af64315531/Mac.c.zip)
-- Analyzer: [Maratus `cf7da12`](https://github.com/0x4D31/maratus/commit/cf7da12c3d3f0c2ea383de2cb085d43d922059a2), default analysis settings.
+- Analyzer: [Maratus `38b6978`](https://github.com/0x4D31/maratus/commit/38b6978697141b34a9c51d1cdf3fa152b6349229), default analysis settings. Terminal output rendered with [`551d6b9`](https://github.com/0x4D31/maratus/commit/551d6b9ddad39c25d822f539b37ab3339b7a13f7).
 
 ## Terminal excerpt
 
-These are selected lines from the saved report. `[…]` marks omissions.
+Selected terminal lines follow. `[…]` marks omissions.
 
 ```text
 Results     4 artifacts · 0 execution roots · 0 invoked targets · 8 matches across 5 capabilities
-[…]
+Analysis    5 limited scopes; details in canonical JSON or --detail full
+Contains    macho-fat (1), script (1)
+
 CAPABILITIES (4 capabilities · 5 matches)
   CAPABILITY                                                    NAMESPACE
   Accesses macOS Keychain credentials                           macos.credentials
   Prompts for credential input                                  macos.credentials
   Queries system information [system_profiler]                  macos.discovery
-[…]
-OBSERVABLES (4 static items)
-  TYPE                            VALUE
+  Calls native process-e... [macho-symbol, system] (2 matches)  macos.execution
+  Match status: execution: 2 unconnected · 3 unknown; support: 5 corroborated
 […]
   crypto-wallet                   /.electrum/wallets/
   keychain                        login.keychain-db

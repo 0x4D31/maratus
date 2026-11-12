@@ -9,36 +9,25 @@ other members.
 - Archive SHA-256: `2300dd2acf7d6a9c3a7dc012aa79af390c877ea24adbc995654287f70a87da9f`
 - Focused member SHA-256: `ef1c7d6651996a3dccee755630add52c3f04a6e474ad15a999e132cafbf83f18`
 - Source: [Objective-See/Malware, pinned revision](https://github.com/objective-see/Malware/blob/16c4f3bf685b1ed95e83d39d6b92c6af64315531/CloudChat.zip)
-- Analyzer: [Maratus `cf7da12`](https://github.com/0x4D31/maratus/commit/cf7da12c3d3f0c2ea383de2cb085d43d922059a2), default analysis settings.
+- Analyzer: [Maratus `38b6978`](https://github.com/0x4D31/maratus/commit/38b6978697141b34a9c51d1cdf3fa152b6349229), default analysis settings. Terminal output rendered with [`551d6b9`](https://github.com/0x4D31/maratus/commit/551d6b9ddad39c25d822f539b37ab3339b7a13f7).
 
 ## Terminal excerpt
 
-These lines are copied from the terminal report. `[…]` marks omitted lines;
-the tool's own `...` marks truncated display text. Network literals are omitted.
+Selected terminal lines follow. `[…]` marks omissions.
 
 ```text
 Results     30 artifacts · 0 execution roots · 0 invoked targets · 20 matches across 6 capabilities
 Analysis    17 limited scopes · 2 diagnostics; details in canonical JSON or --detail full
+Contains    app-bundle (1), macho (6), script (1)
 
 CAPABILITIES (1 capability · 7 matches)
   CAPABILITY                                                    NAMESPACE
   Executes a concrete file (7 matches)                          macos.execution
   Match status: execution: 7 unknown; support: 7 corroborated
 […]
-LANGUAGE FUNCTION CONTEXT (35 functions)
-[…]
-  main.compressLogsdata                                   CloudChat.zip!CloudChat/A/clip_.Safari_...
-  main.copyAndCompressWalletPlugins                       CloudChat.zip!CloudChat/A/clip_.Safari_...
-[…]
-ADDITIONAL MODELED BEHAVIOR (19 groups)
-  OPERATION                 COUNT  SUPPORT        REACHABILITY  DETAIL
-  process.execute               1  CORROBORATED   UNKNOWN      executable: cp · variadic argv
-                                                               unresolved · via os/exec.(*Cmd).Run, ...
-                                                               CloudChat.zip!CloudChat/A/clip_.Safar...
-[…]
   process.execute               1  CORROBORATED   UNKNOWN      executable: tar · variadic argv
                                                                unresolved · via os/exec.(*Cmd).Run, ...
-                                                               CloudChat.zip!CloudChat/A/clip_.Safar...
+                                                               evidence 0x110146c · main.compressLog...
 ```
 
 ## Scoped operations and their evidence

@@ -8,16 +8,16 @@ matters when reading the archive's combined findings.
 - Input: `Pymafka.zip`
 - Archive SHA-256: `240924898480a88fe40bd98644b62aed9d5e0a9d522b3ae73faaabf8d6cc7e35`
 - Source: [Objective-See/Malware, pinned revision](https://github.com/objective-see/Malware/blob/16c4f3bf685b1ed95e83d39d6b92c6af64315531/Pymafka.zip)
-- Analyzer: [Maratus `cf7da12`](https://github.com/0x4D31/maratus/commit/cf7da12c3d3f0c2ea383de2cb085d43d922059a2), default analysis settings.
+- Analyzer: [Maratus `38b6978`](https://github.com/0x4D31/maratus/commit/38b6978697141b34a9c51d1cdf3fa152b6349229), default analysis settings. Terminal output rendered with [`551d6b9`](https://github.com/0x4D31/maratus/commit/551d6b9ddad39c25d822f539b37ab3339b7a13f7).
 
 ## Output excerpt
 
-These are terminal-report lines with one network destination replaced by
-`[redacted network destination]`. `[…]` marks omitted lines.
+Selected terminal lines follow. `[…]` marks omissions.
 
 ```text
 Results     13 artifacts · 0 execution roots · 0 invoked targets · 8 matches across 6 capabilities
 Analysis    6 limited scopes; details in canonical JSON or --detail full
+Contains    macho (1), script (2)
 
 CAPABILITIES (4 capabilities · 5 matches)
   CAPABILITY                                                    NAMESPACE
@@ -26,10 +26,6 @@ CAPABILITIES (4 capabilities · 5 matches)
   Executes a concrete file [subprocess.Popen] (2 matches)       macos.execution
   Pipes downloaded content into an interpreter                  macos.execution
   Match status: execution: 5 unknown; support: 2 direct · 3 corroborated
-[…]
-NETWORK EVIDENCE (1 path)
-  ◆ [redacted network destination]
-    via curl → curl/libcurl → libcurl-selected TLS backend
 ```
 
 ## Darwin branch: concrete operands and source locations
