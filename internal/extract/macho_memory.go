@@ -110,22 +110,40 @@ func (memory *machoLinearMemory) reset() {
 }
 
 func (memory *machoLinearMemory) store(address, size uint64, known bool) {
-	if len(memory.writes) >= maxMachOLinearWrites {
-		memory.truncated = true
-		memory.lostWrites = true
-	}
-	if !known || size == 0 || size > ^uint64(0)-address || len(memory.writes) >= maxMachOLinearWrites {
+	if !known || size == 0 || size > ^uint64(0)-address {
 		memory.unknownWrite = true
 		return
 	}
-	memory.writes = append(memory.writes, machoMemoryRange{address, address + size})
+	write := machoMemoryRange{address, address + size}
+	first := sort.Search(len(memory.writes), func(i int) bool { return memory.writes[i].end >= write.start })
+	last := first
+	// Only overlap or adjacency can join intervals. A gap is included only
+	// when this new store itself writes every byte of that gap.
+	for last < len(memory.writes) && memory.writes[last].start <= write.end {
+		write.start = min(write.start, memory.writes[last].start)
+		write.end = max(write.end, memory.writes[last].end)
+		last++
+	}
+	if last > first {
+		memory.writes[first] = write
+		copy(memory.writes[first+1:], memory.writes[last:])
+		memory.writes = memory.writes[:len(memory.writes)-(last-first)+1]
+		return
+	}
+	if len(memory.writes) >= maxMachOLinearWrites {
+		memory.truncated, memory.lostWrites, memory.unknownWrite = true, true, true
+		return
+	}
+	memory.writes = append(memory.writes, machoMemoryRange{})
+	copy(memory.writes[first+1:], memory.writes[first:])
+	memory.writes[first] = write
 }
 
 func (memory *machoLinearMemory) allows(section *macho.Section, address, size uint64) bool {
 	if memory == nil {
 		return true
 	}
-	if size > ^uint64(0)-address || (memory.unknownWrite || memory.callBoundary) && !memory.sectionReadOnly(section) {
+	if memory.lostWrites || size > ^uint64(0)-address || (memory.unknownWrite || memory.callBoundary) && !memory.sectionReadOnly(section) {
 		return false
 	}
 	return !memory.overwrites(address, size)
