@@ -771,7 +771,7 @@ func plistModificationTarget(tool string, fields []string) (behavior.Resource, s
 			return behavior.Resource{}, "", false
 		}
 		target := staticShellResource(fields[len(fields)-1])
-		if target == "" {
+		if target == "" || strings.HasPrefix(target, "-") {
 			return behavior.Resource{}, "", false
 		}
 		return behavior.NewResource(behavior.ResourceFile, target, behavior.ResourceClassPropertyList), strings.TrimPrefix(command[1], ":"), true

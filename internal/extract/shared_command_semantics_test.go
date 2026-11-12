@@ -323,3 +323,10 @@ func TestDefaultsUnresolvedPathDoesNotBecomeSyntheticPlist(t *testing.T) {
 		t.Fatalf("unresolved path became concrete: %#v", resource)
 	}
 }
+
+func TestPlistBuddyHelpOptionIsNotAFileMutation(t *testing.T) {
+	_, _, ok := plistModificationTarget("PlistBuddy", []string{"PlistBuddy", "-c", "Set :Key value", "-h"})
+	if ok {
+		t.Fatal("help option became a file target")
+	}
+}
