@@ -3,6 +3,7 @@ package extract
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/0x4D31/maratus/internal/artifact"
@@ -915,6 +916,9 @@ func extractPythonArchiveObjectCall(
 		addPartialCoverageOnce(graph, lineContent.NodeID, pythonAPIBindingAnalysisArea, fmt.Sprintf("Python archive extraction chain exceeded retained call or argument bounds (%d bytes, %d arguments)", maxPythonAPICallBytes, maxTextStringExpressionArguments))
 	}
 	if !ok {
+		if invocation.bindingName != "" {
+			bindings.unsupportedCalls = true
+		}
 		return
 	}
 	bindingEvidenceID := bindings.bindingProofEvidence(graph, rootContent, invocation.bindingProof)
@@ -978,42 +982,44 @@ func parsePythonArchiveObjectInvocation(line string, lineNo int, bindings *pytho
 			continue
 		}
 		open := pythonSkipHorizontal(code, len(prefix))
+		if open >= len(code) || code[open] != '(' {
+			continue
+		}
+		candidate := pythonArchiveObjectInvocation{bindingName: name, bindingProof: proof, api: proof.canonical + "." + constructor + ".extractall"}
 		constructorText, constructorClose, exact, limited := exactPythonCallContent(code, open, maxPythonAPICallBytes)
 		if limited {
-			return pythonArchiveObjectInvocation{}, false, true
+			return candidate, false, true
 		}
 		if !exact {
-			continue
+			return candidate, false, false
 		}
 		methodStart := pythonSkipHorizontal(code, constructorClose+1)
 		if !strings.HasPrefix(code[methodStart:], ".extractall") {
-			continue
+			return candidate, false, false
 		}
 		methodOpen := pythonSkipHorizontal(code, methodStart+len(".extractall"))
 		methodText, methodClose, methodExact, methodLimited := exactPythonCallContent(code, methodOpen, maxPythonAPICallBytes)
 		if methodLimited {
-			return pythonArchiveObjectInvocation{}, false, true
+			return candidate, false, true
 		}
 		if !methodExact || strings.TrimSpace(code[methodClose+1:]) != "" {
-			continue
+			return candidate, false, false
 		}
 		constructorArgs, constructorLimited, constructorMalformed := exactPythonArguments(constructorText, maxTextStringExpressionArguments)
 		methodArgs, methodArgsLimited, methodMalformed := exactPythonArguments(methodText, maxTextStringExpressionArguments)
 		if constructorLimited || methodArgsLimited {
-			return pythonArchiveObjectInvocation{}, false, true
+			return candidate, false, true
 		}
 		if constructorMalformed || methodMalformed {
-			continue
+			return candidate, false, false
 		}
 		source, constructorOK := pythonArchiveConstructorSource(proof.canonical, constructorArgs)
 		target, methodOK := pythonArchiveExtractTarget(proof.canonical, methodArgs)
 		if !constructorOK || !methodOK {
-			continue
+			return candidate, false, false
 		}
-		return pythonArchiveObjectInvocation{
-			bindingName: name, bindingProof: proof, api: proof.canonical + "." + constructor + ".extractall",
-			sourceExpression: source, targetExpression: target,
-		}, true, false
+		candidate.sourceExpression, candidate.targetExpression = source, target
+		return candidate, true, false
 	}
 	return pythonArchiveObjectInvocation{}, false, false
 }
@@ -1043,9 +1049,14 @@ func pythonArchiveConstructorSource(module string, arguments []string) (string, 
 		}
 	}
 	mode := pythonParameterExpression(positional, keywords, parameters, "mode")
-	if mode != "" {
-		value, exact := exactPythonStringLiteral(mode)
-		if !exact || module == "zipfile" && value != "r" || module == "tarfile" && !strings.HasPrefix(value, "r") {
+	if !pythonArchiveReadMode(module, mode) {
+		return "", false
+	}
+	if module == "tarfile" {
+		// fileobj replaces the named archive as the source of bytes. The name
+		// alone therefore cannot establish an exact file resource.
+		fileobj := strings.TrimSpace(pythonParameterExpression(positional, keywords, parameters, "fileobj"))
+		if fileobj != "" && fileobj != "None" {
 			return "", false
 		}
 	}
@@ -1053,7 +1064,39 @@ func pythonArchiveConstructorSource(module string, arguments []string) (string, 
 	if source == "" || strings.TrimSpace(source) == "None" {
 		return "", false
 	}
+	if module == "zipfile" && pythonBytesLiteralPrefix(source) {
+		// ZipFile treats bytes as a file-like object, not as a pathname.
+		return "", false
+	}
 	return source, true
+}
+
+func pythonArchiveReadMode(module, expression string) bool {
+	if expression == "" {
+		return true
+	}
+	value, exact := exactPythonStringLiteral(expression)
+	if !exact {
+		return false
+	}
+	if module == "zipfile" {
+		return value == "r"
+	}
+	switch value {
+	case "r", "r:*", "r:", "r:gz", "r:bz2", "r:xz", "r:zst", "r|", "r|*", "r|gz", "r|bz2", "r|xz", "r|zst":
+		return true
+	default:
+		return false
+	}
+}
+
+func pythonLiteralPrefix(expression, prefix string) bool {
+	expression = strings.TrimSpace(expression)
+	return len(expression) > len(prefix) && strings.EqualFold(expression[:len(prefix)], prefix) && (expression[len(prefix)] == '\'' || expression[len(prefix)] == '"')
+}
+
+func pythonBytesLiteralPrefix(expression string) bool {
+	return pythonLiteralPrefix(expression, "b") || pythonLiteralPrefix(expression, "br") || pythonLiteralPrefix(expression, "rb")
 }
 
 func pythonArchiveExtractTarget(module string, arguments []string) (string, bool) {
@@ -1080,7 +1123,45 @@ func pythonArchiveExtractTarget(module string, arguments []string) (string, bool
 			return "", false
 		}
 	}
-	return pythonParameterExpression(positional, keywords, parameters, "path"), true
+	// Custom member iterables and filters may replace the members or their
+	// destinations. Keep them outside the exact constructor/consumer profile.
+	if members := strings.TrimSpace(pythonParameterExpression(positional, keywords, parameters, "members")); members != "" && members != "None" {
+		return "", false
+	}
+	if module == "tarfile" {
+		filter := strings.TrimSpace(pythonParameterExpression(positional, keywords, parameters, "filter"))
+		if filter != "" && filter != "None" {
+			value, exact := exactPythonStringLiteral(filter)
+			if !exact || value != "data" && value != "tar" && value != "fully_trusted" {
+				return "", false
+			}
+		}
+		if owner := strings.TrimSpace(keywords["numeric_owner"]); owner != "" && owner != "True" && owner != "False" {
+			return "", false
+		}
+	} else if pwd := strings.TrimSpace(pythonParameterExpression(positional, keywords, parameters, "pwd")); pwd != "" && pwd != "None" {
+		if !pythonLiteralPrefix(pwd, "b") {
+			return "", false
+		}
+		value, exact := exactPythonStringLiteral(pwd[1:])
+		if !exact || !pythonASCIIString(value) {
+			return "", false
+		}
+	}
+	path := pythonParameterExpression(positional, keywords, parameters, "path")
+	if pythonBytesLiteralPrefix(path) {
+		return "", false
+	}
+	return path, true
+}
+
+func pythonASCIIString(value string) bool {
+	for index := range len(value) {
+		if value[index] > 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func pythonArgumentsUseOnlyParameters(positional []string, keywords map[string]string, parameters []string) bool {
@@ -1134,7 +1215,11 @@ func extractPythonBuiltinOpenRead(
 		if limited {
 			addPartialCoverageOnce(graph, content.NodeID, pythonAPIBindingAnalysisArea, fmt.Sprintf("Python builtin open call exceeded %d bytes", maxPythonAPICallBytes))
 		}
-		if !exact || !pythonExactReadMemberCall(line, close) {
+		readArguments, readExact, readLimited := pythonReadMemberCallArguments(line, close)
+		if readLimited {
+			addPartialCoverageOnce(graph, content.NodeID, pythonAPIBindingAnalysisArea, fmt.Sprintf("Python builtin read call exceeded %d bytes", maxPythonAPICallBytes))
+		}
+		if !exact || !readExact {
 			continue
 		}
 		arguments, argumentLimited, malformed := exactPythonArguments(argumentsText, maxTextStringExpressionArguments)
@@ -1146,30 +1231,18 @@ func extractPythonBuiltinOpenRead(
 		}
 		positional, keywords, stable := pythonStableArgumentShape(arguments)
 		if malformed || !stable || len(arguments) == 0 || len(arguments) > 8 || len(positional) > 8 {
+			bindings.unsupportedCalls = true
 			continue
-		}
-		for name := range keywords {
-			switch name {
-			case "file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener":
-			default:
-				stable = false
-			}
 		}
 		parameters := []string{"file", "mode", "buffering", "encoding", "errors", "newline", "closefd", "opener"}
-		for index := 0; index < len(positional) && index < len(parameters); index++ {
-			if _, duplicate := keywords[parameters[index]]; duplicate {
-				stable = false
-			}
-		}
-		if !stable {
+		if !pythonArgumentsUseOnlyParameters(positional, keywords, parameters) || !pythonBuiltinOpenReadOptions(positional, keywords, parameters) || !pythonBuiltinReadSize(readArguments) {
+			bindings.unsupportedCalls = true
 			continue
 		}
-		pathExpression := keywords["file"]
-		if len(positional) > 0 {
-			pathExpression = positional[0]
-		}
-		path := simpleStringLiteral(pathExpression)
-		if path == "" {
+		pathExpression := pythonParameterExpression(positional, keywords, parameters, "file")
+		path, exactPath := exactPythonStringLiteral(pathExpression)
+		if !exactPath || path == "" || strings.ContainsRune(path, '\x00') {
+			bindings.unsupportedCalls = true
 			continue
 		}
 		resource := classifiedFileResource(path)
@@ -1186,22 +1259,130 @@ func extractPythonBuiltinOpenRead(
 	}
 }
 
-func pythonExactReadMemberCall(line string, close int) bool {
+// Only options that preserve a readable stream and the literal pathname are
+// supported. In particular, an opener can return an unrelated file descriptor.
+// The codec registry and dynamic argument expressions are not evaluated.
+func pythonBuiltinOpenReadOptions(positional []string, keywords map[string]string, parameters []string) bool {
+	parameter := func(name string) string {
+		return strings.TrimSpace(pythonParameterExpression(positional, keywords, parameters, name))
+	}
+	mode := "r"
+	if expression := parameter("mode"); expression != "" {
+		var exact bool
+		mode, exact = exactPythonStringLiteral(expression)
+		if !exact {
+			return false
+		}
+	}
+	seen := map[byte]bool{}
+	primary := byte(0)
+	for index := range len(mode) {
+		character := mode[index]
+		if seen[character] {
+			return false
+		}
+		seen[character] = true
+		switch character {
+		case 'r', 'w', 'a', 'x':
+			if primary != 0 {
+				return false
+			}
+			primary = character
+		case 'b', 't', '+':
+		default:
+			return false
+		}
+	}
+	// A direct read from w+/x+ starts with an empty file, and a+ starts at
+	// EOF. Without cursor/content modeling, only r-family modes establish
+	// the supported source-read relationship used by resource rules.
+	if primary != 'r' || seen['b'] && seen['t'] {
+		return false
+	}
+	if opener := parameter("opener"); opener != "" && opener != "None" {
+		return false
+	}
+	if closefd := parameter("closefd"); closefd != "" && closefd != "True" {
+		return false
+	}
+	if buffering := parameter("buffering"); buffering != "" {
+		size, exact := pythonBuiltinInteger(buffering)
+		if !exact || size == 0 && !seen['b'] {
+			return false
+		}
+	}
+	for _, name := range []string{"encoding", "errors", "newline"} {
+		expression := parameter(name)
+		if expression == "" || expression == "None" {
+			continue
+		}
+		value, exact := exactPythonStringLiteral(expression)
+		if !exact || seen['b'] {
+			return false
+		}
+		switch name {
+		case "encoding":
+			switch strings.ToLower(strings.ReplaceAll(value, "_", "-")) {
+			case "utf-8", "utf8", "ascii", "us-ascii":
+			default:
+				return false
+			}
+		case "errors":
+			switch value {
+			case "strict", "ignore", "replace", "surrogateescape", "surrogatepass", "backslashreplace":
+			default:
+				return false
+			}
+		case "newline":
+			switch value {
+			case "", "\n", "\r", "\r\n":
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func pythonBuiltinReadSize(arguments string) bool {
+	values, limited, malformed := exactPythonArguments(arguments, 1)
+	if limited || malformed || len(values) > 1 {
+		return false
+	}
+	if len(values) == 0 || strings.TrimSpace(values[0]) == "None" {
+		return true
+	}
+	size, exact := pythonBuiltinInteger(strings.TrimSpace(values[0]))
+	return exact && size != 0
+}
+
+func pythonBuiltinInteger(expression string) (int64, bool) {
+	if !pythonDecimalIntegerLiteral(expression) {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(strings.ReplaceAll(expression, "_", ""), 10, 64)
+	return value, err == nil
+}
+
+func pythonReadMemberCallArguments(line string, close int) (string, bool, bool) {
+	if close < 0 {
+		return "", false, false
+	}
 	cursor := pythonSkipHorizontal(line, close+1)
 	if cursor >= len(line) || line[cursor] != '.' {
-		return false
+		return "", false, false
 	}
 	cursor = pythonSkipHorizontal(line, cursor+1)
 	if !strings.HasPrefix(line[cursor:], "read") {
-		return false
+		return "", false, false
 	}
 	end := cursor + len("read")
 	if end < len(line) && pythonIdentifierByte(line[end]) {
-		return false
+		return "", false, false
 	}
 	open := pythonSkipHorizontal(line, end)
-	_, _, exact, _ := exactPythonCallContent(line, open, maxPythonAPICallBytes)
-	return exact
+	arguments, _, exact, limited := exactPythonCallContent(line, open, maxPythonAPICallBytes)
+	return arguments, exact, limited
 }
 
 func lookupPythonAPISpec(api string) (pythonAPISpec, bool) {
@@ -1216,7 +1397,7 @@ func pythonSourceAPICallObserved(line string, lineNo int, bindings *pythonStable
 	if bindings != nil && bindings.builtinOpenSafe && pythonBuiltinOpenReadObserved(line) {
 		return true
 	}
-	if _, ok, limited := parsePythonArchiveObjectInvocation(line, lineNo, bindings, ordered); ok || limited {
+	if invocation, ok, limited := parsePythonArchiveObjectInvocation(line, lineNo, bindings, ordered); invocation.bindingName != "" || ok || limited {
 		return true
 	}
 	proofs := pythonEffectiveAPIBindings(bindings, ordered, lineNo)
@@ -1245,12 +1426,16 @@ func pythonSourceAPICallObserved(line string, lineNo int, bindings *pythonStable
 func pythonBuiltinOpenReadObserved(line string) bool {
 	code := pythonCodeContext(line)
 	for _, position := range pythonIdentifierPositions(code, "open") {
-		if position > 0 && code[position-1] == '.' {
+		if pythonIdentifierHasMemberPrefix(code, position) {
 			continue
 		}
 		open := pythonSkipHorizontal(code, position+len("open"))
-		_, close, exact, _ := exactPythonCallContent(line, open, maxPythonAPICallBytes)
-		if exact && pythonExactReadMemberCall(line, close) {
+		_, close, exact, limited := exactPythonCallContent(line, open, maxPythonAPICallBytes)
+		if limited {
+			return true
+		}
+		_, readExact, readLimited := pythonReadMemberCallArguments(line, close)
+		if exact && (readExact || readLimited) {
 			return true
 		}
 	}
@@ -1311,24 +1496,9 @@ func canonicalizePythonSubprocessRoot(line, root string) string {
 }
 
 func pythonAPISpecHasArguments(spec pythonAPISpec, arguments []string) bool {
-	positional, keywords, ok := pythonStableArgumentShape(arguments)
-	if !ok || len(arguments) < spec.minArgs || len(arguments) > spec.maxArgs || len(positional) > spec.maxPositional {
+	signature := pythonCallSignature{minArgs: spec.minArgs, maxArgs: spec.maxArgs, maxPositional: spec.maxPositional, positionalOnly: spec.positionalOnly, parameters: spec.parameters}
+	if !signature.accepts(arguments) {
 		return false
-	}
-	parameterIndexes := make(map[string]int, len(spec.parameters))
-	for index, parameter := range spec.parameters {
-		parameterIndexes[parameter] = index
-	}
-	for name := range keywords {
-		index, known := parameterIndexes[name]
-		if !known || index < spec.positionalOnly || index < len(positional) {
-			return false
-		}
-	}
-	for index := 0; index < spec.minArgs; index++ {
-		if index >= len(positional) && keywords[spec.parameters[index]] == "" {
-			return false
-		}
 	}
 	for _, resource := range spec.resources {
 		if resource.index < 0 {
@@ -1336,6 +1506,29 @@ func pythonAPISpecHasArguments(spec pythonAPISpec, arguments []string) bool {
 		}
 		_, present := pythonResourceArgument(arguments, resource)
 		if !present && resource.defaultValue == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (signature pythonCallSignature) accepts(arguments []string) bool {
+	positional, keywords, ok := pythonStableArgumentShape(arguments)
+	if !ok || len(arguments) < signature.minArgs || len(arguments) > signature.maxArgs || len(positional) > signature.maxPositional {
+		return false
+	}
+	parameterIndexes := make(map[string]int, len(signature.parameters))
+	for index, parameter := range signature.parameters {
+		parameterIndexes[parameter] = index
+	}
+	for name := range keywords {
+		index, known := parameterIndexes[name]
+		if !known || index < signature.positionalOnly || index < len(positional) {
+			return false
+		}
+	}
+	for index := 0; index < signature.minArgs; index++ {
+		if index >= len(positional) && keywords[signature.parameters[index]] == "" {
 			return false
 		}
 	}

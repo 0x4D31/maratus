@@ -11,7 +11,7 @@ import (
 	"github.com/0x4D31/maratus/internal/behavior"
 )
 
-const SummarySchemaVersion = "maratus.summary.v0.1-preview.8"
+const SummarySchemaVersion = "maratus.summary.v0.1-preview.9"
 
 const maxSummaryCodeContext = 128
 
@@ -31,6 +31,11 @@ type Summary struct {
 	ReportSchemaVersion   string                   `json:"report_schema_version"`
 	Tool                  string                   `json:"tool"`
 	ToolVersion           string                   `json:"tool_version"`
+	ToolCommit            string                   `json:"tool_commit,omitempty"`
+	ToolModified          bool                     `json:"tool_modified,omitempty"`
+	RulesetVersion        string                   `json:"ruleset_version"`
+	RuleCatalogDigest     string                   `json:"rule_catalog_digest"`
+	Analysis              AnalysisMetadata         `json:"analysis"`
 	Artifact              string                   `json:"artifact"`
 	Overview              SummaryOverview          `json:"result_overview"`
 	Capabilities          []SummaryCapability      `json:"operation_backed_capabilities"`
@@ -69,34 +74,41 @@ type SummaryActivation struct {
 }
 
 type SummaryBehavior struct {
-	Kind            behavior.OperationKind     `json:"kind"`
-	Count           int                        `json:"count"`
-	Support         behavior.Support           `json:"support"`
-	Connectivity    behavior.Connectivity      `json:"connectivity"`
-	SubjectNodeID   string                     `json:"subject_node_id"`
-	OperationIDs    []string                   `json:"operation_ids"`
-	Resources       []behavior.ResourceBinding `json:"resources"`
-	Implementations []string                   `json:"implementations,omitempty"`
-	Unresolved      []string                   `json:"unresolved,omitempty"`
-	Sources         []SummarySource            `json:"sources"`
+	Kind               behavior.OperationKind     `json:"kind"`
+	Count              int                        `json:"count"`
+	Support            behavior.Support           `json:"support"`
+	Connectivity       behavior.Connectivity      `json:"connectivity"`
+	SubjectNodeID      string                     `json:"subject_node_id"`
+	ScopeID            string                     `json:"scope_id,omitempty"`
+	Architecture       string                     `json:"architecture,omitempty"`
+	Execution          behavior.ExecutionContext  `json:"execution"`
+	OperationIDs       []string                   `json:"operation_ids"`
+	Resources          []behavior.ResourceBinding `json:"resources"`
+	Implementations    []string                   `json:"implementations,omitempty"`
+	RequestedArguments []string                   `json:"requested_arguments,omitempty"`
+	Unresolved         []string                   `json:"unresolved,omitempty"`
+	Sources            []SummarySource            `json:"sources"`
 }
 
 type SummaryCapability struct {
-	Category          SummaryCapabilityCategory `json:"category"`
-	RuleID            string                    `json:"rule_id"`
-	Title             string                    `json:"title"`
-	Namespace         string                    `json:"namespace"`
-	Count             int                       `json:"count"`
-	Support           behavior.Support          `json:"support"`
-	Connectivity      behavior.Connectivity     `json:"connectivity"`
-	SubjectNodeIDs    []string                  `json:"subject_node_ids"`
-	MatchIDs          []string                  `json:"match_ids"`
-	OperationIDs      []string                  `json:"operation_ids"`
-	AffectedResources []behavior.Resource       `json:"affected_resources"`
-	Implementations   []string                  `json:"implementations,omitempty"`
-	Unresolved        []string                  `json:"unresolved,omitempty"`
-	Attack            []string                  `json:"attack"`
-	Sources           []SummarySource           `json:"sources"`
+	Category           SummaryCapabilityCategory `json:"category"`
+	RuleID             string                    `json:"rule_id"`
+	Title              string                    `json:"title"`
+	Namespace          string                    `json:"namespace"`
+	Count              int                       `json:"count"`
+	Support            behavior.Support          `json:"support"`
+	Connectivity       behavior.Connectivity     `json:"connectivity"`
+	Execution          behavior.ExecutionContext `json:"execution"`
+	ArchitectureScopes []string                  `json:"architecture_scopes"`
+	SubjectNodeIDs     []string                  `json:"subject_node_ids"`
+	MatchIDs           []string                  `json:"match_ids"`
+	OperationIDs       []string                  `json:"operation_ids"`
+	AffectedResources  []behavior.Resource       `json:"affected_resources"`
+	Implementations    []string                  `json:"implementations,omitempty"`
+	RequestedArguments []string                  `json:"requested_arguments,omitempty"`
+	Unresolved         []string                  `json:"unresolved,omitempty"`
+	Attack             []string                  `json:"attack"`
+	Sources            []SummarySource           `json:"sources"`
 }
 
 type SummaryNetwork struct {
@@ -160,7 +172,8 @@ type SummarySource struct {
 func ProjectSummary(rep Report) Summary {
 	summary := Summary{
 		SchemaVersion: SummarySchemaVersion, ReportSchemaVersion: rep.SchemaVersion,
-		Tool: rep.Tool, ToolVersion: rep.ToolVersion, Artifact: rep.Artifact,
+		Tool: rep.Tool, ToolVersion: rep.ToolVersion, ToolCommit: rep.ToolCommit, ToolModified: rep.ToolModified,
+		RulesetVersion: rep.RulesetVersion, RuleCatalogDigest: rep.RuleCatalogDigest, Analysis: rep.Analysis, Artifact: rep.Artifact,
 		Overview: SummaryOverview{
 			ArtifactNodes: len(rep.ArtifactNodes), ExecutionRoots: len(rep.ExecutionRoots), InvokedTargets: len(rep.InvokedTargets),
 			Operations: len(rep.Operations), CapabilityMatches: len(rep.Capabilities), Features: len(rep.Features),
@@ -348,22 +361,27 @@ func projectBehavior(rep Report) []SummaryBehavior {
 		connectivity behavior.Connectivity
 		node         string
 		resources    string
+		context      string
+		architecture string
+		scope        string
+		requested    string
 	}
 	evidence := evidenceMap(rep.Evidence)
 	indexes := map[key]int{}
 	rows := make([]SummaryBehavior, 0)
 	for _, operation := range rep.Operations {
-		identity := key{operation.Kind, operation.Support, executionConnectivity(operation.Execution), operation.SubjectNodeID, summaryBindingIdentity(operation.ResourceBindings)}
+		identity := key{operation.Kind, operation.Support, executionConnectivity(operation.Execution), operation.SubjectNodeID, summaryBindingIdentity(operation.ResourceBindings), executionContextIdentityKey(operation.Execution), operation.Architecture, operation.ScopeID, semanticIdentityKey(summaryOperationRequestedArguments(operation)...)}
 		index, ok := indexes[identity]
 		if !ok {
 			index = len(rows)
 			indexes[identity] = index
-			rows = append(rows, SummaryBehavior{Kind: operation.Kind, Support: operation.Support, Connectivity: identity.connectivity, SubjectNodeID: operation.SubjectNodeID, OperationIDs: []string{}, Resources: []behavior.ResourceBinding{}, Implementations: []string{}, Unresolved: []string{}, Sources: []SummarySource{}})
+			rows = append(rows, SummaryBehavior{Kind: operation.Kind, Support: operation.Support, Connectivity: identity.connectivity, SubjectNodeID: operation.SubjectNodeID, ScopeID: operation.ScopeID, Architecture: operation.Architecture, Execution: operation.Execution, OperationIDs: []string{}, Resources: []behavior.ResourceBinding{}, Implementations: []string{}, Unresolved: []string{}, Sources: []SummarySource{}})
 		}
 		rows[index].Count++
 		rows[index].OperationIDs = append(rows[index].OperationIDs, operation.ID)
 		rows[index].Resources = appendUniqueSummaryBindings(rows[index].Resources, operation.ResourceBindings...)
 		rows[index].Implementations = appendUniqueStrings(rows[index].Implementations, summaryOperationImplementations(operation)...)
+		rows[index].RequestedArguments = appendUniqueStrings(rows[index].RequestedArguments, summaryOperationRequestedArguments(operation)...)
 		rows[index].Unresolved = appendUniqueStrings(rows[index].Unresolved, summaryOperationUnresolved(operation)...)
 		rows[index].Sources = append(rows[index].Sources, sourcesForEvidence(operation.EvidenceIDs, evidence)...)
 	}
@@ -373,6 +391,9 @@ func projectBehavior(rep Report) []SummaryBehavior {
 		sort.Strings(rows[index].Unresolved)
 	}
 	sort.Slice(rows, func(i, j int) bool {
+		if left, right := summaryBehaviorPriority(rows[i]), summaryBehaviorPriority(rows[j]); left != right {
+			return left < right
+		}
 		if rows[i].Kind != rows[j].Kind {
 			return rows[i].Kind < rows[j].Kind
 		}
@@ -385,9 +406,50 @@ func projectBehavior(rep Report) []SummaryBehavior {
 		if rows[i].SubjectNodeID != rows[j].SubjectNodeID {
 			return rows[i].SubjectNodeID < rows[j].SubjectNodeID
 		}
+		if rows[i].Architecture != rows[j].Architecture {
+			return rows[i].Architecture < rows[j].Architecture
+		}
+		if rows[i].ScopeID != rows[j].ScopeID {
+			return rows[i].ScopeID < rows[j].ScopeID
+		}
+		if left, right := executionContextIdentityKey(rows[i].Execution), executionContextIdentityKey(rows[j].Execution); left != right {
+			return left < right
+		}
+		if left, right := semanticIdentityKey(rows[i].RequestedArguments...), semanticIdentityKey(rows[j].RequestedArguments...); left != right {
+			return left < right
+		}
 		return summaryBindingIdentity(rows[i].Resources) < summaryBindingIdentity(rows[j].Resources)
 	})
 	return rows
+}
+
+// This ordering prioritizes actionable requests, not maliciousness or runtime
+// occurrence. Generic inventory remains present in the projection.
+func summaryBehaviorPriority(row SummaryBehavior) int {
+	concrete := len(row.RequestedArguments) > 0
+	for _, binding := range row.Resources {
+		if binding.Resource.Value != "" && (binding.Resource.Kind == behavior.ResourceFile || binding.Resource.Kind == behavior.ResourceURL || binding.Resource.Kind == behavior.ResourceCommand) {
+			concrete = true
+		}
+	}
+	if concrete {
+		switch row.Kind {
+		case behavior.OperationProcessExecute, behavior.OperationInterpreterInvoke, behavior.OperationNetworkDownload, behavior.OperationNetworkUpload, behavior.OperationArchiveCreate:
+			return 0
+		}
+		return 1
+	}
+	return 2
+}
+
+func summaryOperationRequestedArguments(operation behavior.ModeledOperation) []string {
+	var values []string
+	for _, key := range []string{"command_argument", "executable_argument"} {
+		if value := operation.Qualifiers[key]; value != "" {
+			values = append(values, strings.ReplaceAll(key, "_", " ")+": "+value)
+		}
+	}
+	return values
 }
 
 func summaryOperationImplementations(operation behavior.ModeledOperation) []string {
@@ -403,8 +465,10 @@ func summaryOperationImplementations(operation behavior.ModeledOperation) []stri
 
 func summaryOperationUnresolved(operation behavior.ModeledOperation) []string {
 	var unresolved []string
-	if value := strings.TrimSpace(operation.Qualifiers["unresolved_arguments"]); value != "" {
-		unresolved = appendUniqueStrings(unresolved, value)
+	for _, key := range []string{"unresolved_arguments", "unresolved_process_options"} {
+		if value := strings.TrimSpace(operation.Qualifiers[key]); value != "" {
+			unresolved = appendUniqueStrings(unresolved, value)
+		}
 	}
 	for _, binding := range operation.ResourceBindings {
 		if !binding.Resource.Unresolved() {
@@ -447,16 +511,17 @@ func summaryBindingIdentity(bindings []behavior.ResourceBinding) string {
 		for index := range classifications {
 			classificationParts[index] = string(classifications[index])
 		}
-		parts = append(parts, string(binding.Role)+"\x00"+string(binding.Resource.Kind)+"\x00"+binding.Resource.Value+"\x00"+strings.Join(classificationParts, "\x00"))
+		parts = append(parts, semanticIdentityKey(string(binding.Role), string(binding.Resource.Kind), binding.Resource.Value, semanticIdentityKey(classificationParts...)))
 	}
 	sort.Strings(parts)
-	return strings.Join(parts, "\x01")
+	return semanticIdentityKey(parts...)
 }
 
 func projectCapabilities(rep Report) []SummaryCapability {
 	type key struct {
-		category                    SummaryCapabilityCategory
-		rule, support, connectivity string
+		category                                SummaryCapabilityCategory
+		rule, support, connectivity             string
+		node, context, architectures, resources string
 	}
 	indexes := map[key]int{}
 	rows := make([]SummaryCapability, 0)
@@ -465,12 +530,12 @@ func projectCapabilities(rep Report) []SummaryCapability {
 	evidence := evidenceMap(rep.Evidence)
 	for _, match := range rep.Capabilities {
 		category := summaryCapabilityCategory(match, operations)
-		identity := key{category, match.RuleID, string(match.Support), string(executionConnectivity(match.Execution))}
+		identity := key{category, match.RuleID, string(match.Support), string(executionConnectivity(match.Execution)), match.SubjectNodeID, executionContextIdentityKey(match.Execution), semanticIdentityKey(match.ArchitectureScopes...), resourcesKey(match.AffectedResources)}
 		index, ok := indexes[identity]
 		if !ok {
 			index = len(rows)
 			indexes[identity] = index
-			rows = append(rows, SummaryCapability{Category: category, RuleID: match.RuleID, Title: match.Title, Namespace: match.Namespace, Support: match.Support, Connectivity: executionConnectivity(match.Execution), SubjectNodeIDs: []string{}, MatchIDs: []string{}, OperationIDs: []string{}, AffectedResources: []behavior.Resource{}, Implementations: []string{}, Unresolved: []string{}, Attack: []string{}, Sources: []SummarySource{}})
+			rows = append(rows, SummaryCapability{Category: category, RuleID: match.RuleID, Title: match.Title, Namespace: match.Namespace, Support: match.Support, Connectivity: executionConnectivity(match.Execution), Execution: match.Execution, ArchitectureScopes: nonnilStrings(match.ArchitectureScopes), SubjectNodeIDs: []string{}, MatchIDs: []string{}, OperationIDs: []string{}, AffectedResources: []behavior.Resource{}, Implementations: []string{}, Unresolved: []string{}, Attack: []string{}, Sources: []SummarySource{}})
 		}
 		rows[index].Count++
 		rows[index].SubjectNodeIDs = append(rows[index].SubjectNodeIDs, match.SubjectNodeID)
@@ -490,6 +555,7 @@ func projectCapabilities(rep Report) []SummaryCapability {
 				continue
 			}
 			rows[index].Implementations = append(rows[index].Implementations, summaryOperationImplementations(operation)...)
+			rows[index].RequestedArguments = appendUniqueStrings(rows[index].RequestedArguments, summaryOperationRequestedArguments(operation)...)
 			rows[index].Unresolved = append(rows[index].Unresolved, summaryOperationUnresolved(operation)...)
 			rows[index].Sources = append(rows[index].Sources, sourcesForEvidence(operation.EvidenceIDs, evidence)...)
 		}
@@ -512,7 +578,22 @@ func projectCapabilities(rep Report) []SummaryCapability {
 		if rows[i].Namespace != rows[j].Namespace {
 			return rows[i].Namespace < rows[j].Namespace
 		}
-		return rows[i].RuleID < rows[j].RuleID
+		if rows[i].RuleID != rows[j].RuleID {
+			return rows[i].RuleID < rows[j].RuleID
+		}
+		if left, right := semanticIdentityKey(rows[i].SubjectNodeIDs...), semanticIdentityKey(rows[j].SubjectNodeIDs...); left != right {
+			return left < right
+		}
+		if left, right := executionContextIdentityKey(rows[i].Execution), executionContextIdentityKey(rows[j].Execution); left != right {
+			return left < right
+		}
+		if left, right := semanticIdentityKey(rows[i].ArchitectureScopes...), semanticIdentityKey(rows[j].ArchitectureScopes...); left != right {
+			return left < right
+		}
+		if rows[i].Support != rows[j].Support {
+			return rows[i].Support < rows[j].Support
+		}
+		return resourcesKey(rows[i].AffectedResources) < resourcesKey(rows[j].AffectedResources)
 	})
 	return rows
 }
@@ -818,6 +899,9 @@ func (p *presentation) summaryAdditionalBehavior(summary Summary) {
 				p.printf("%63s%s\n", "", detail)
 			}
 		}
+		if row.Context != "" {
+			p.printf("%63s%s\n", "", p.style.faint(boundedText(row.Context, 40)))
+		}
 	}
 	if len(rows) > 24 {
 		p.omitted(len(rows)-24, "behavior groups")
@@ -840,37 +924,46 @@ type summaryBehaviorTextRow struct {
 	Support      behavior.Support
 	Connectivity behavior.Connectivity
 	Detail       string
+	Context      string
+	priority     int
 }
 
 func summaryBehaviorTextRows(rows []SummaryBehavior) []summaryBehaviorTextRow {
 	type key struct {
-		kind         behavior.OperationKind
-		support      behavior.Support
-		connectivity behavior.Connectivity
+		kind                                 behavior.OperationKind
+		support                              behavior.Support
+		connectivity                         behavior.Connectivity
+		node, scope, architecture, execution string
 	}
 	type aggregate struct {
 		row             summaryBehaviorTextRow
 		resources       map[string]bool
 		implementations map[string]bool
 		unresolved      map[string]bool
+		requested       map[string]bool
 	}
 	indexes := map[key]int{}
 	groups := make([]aggregate, 0, len(rows))
 	for _, row := range rows {
-		identity := key{row.Kind, row.Support, row.Connectivity}
+		identity := key{row.Kind, row.Support, row.Connectivity, row.SubjectNodeID, row.ScopeID, row.Architecture, executionContextIdentityKey(row.Execution)}
 		index, ok := indexes[identity]
 		if !ok {
 			index = len(groups)
 			indexes[identity] = index
 			groups = append(groups, aggregate{
-				row:             summaryBehaviorTextRow{Kind: row.Kind, Support: row.Support, Connectivity: row.Connectivity},
+				row:             summaryBehaviorTextRow{Kind: row.Kind, Support: row.Support, Connectivity: row.Connectivity, Context: summaryBehaviorContext(row), priority: summaryBehaviorPriority(row)},
 				resources:       map[string]bool{},
 				implementations: map[string]bool{},
 				unresolved:      map[string]bool{},
+				requested:       map[string]bool{},
 			})
 		}
 		groups[index].row.Count += row.Count
 		groups[index].resources[summaryBehaviorResource(row)] = true
+		groups[index].row.priority = min(groups[index].row.priority, summaryBehaviorPriority(row))
+		for _, item := range row.RequestedArguments {
+			groups[index].requested[item] = true
+		}
 		for _, item := range row.Implementations {
 			groups[index].implementations[item] = true
 		}
@@ -891,6 +984,7 @@ func summaryBehaviorTextRows(rows []SummaryBehavior) []summaryBehaviorTextRow {
 		if resourceDetail := summaryBehaviorResourceDetail(group.row.Kind, resources); resourceDetail != "" {
 			details = append(details, resourceDetail)
 		}
+		details = append(details, mapKeysSorted(group.requested)...)
 		unresolved := mapKeysSorted(group.unresolved)
 		if len(unresolved) > 0 {
 			details = append(details, strings.Join(unresolved, ", ")+" unresolved")
@@ -906,15 +1000,38 @@ func summaryBehaviorTextRows(rows []SummaryBehavior) []summaryBehaviorTextRow {
 		out = append(out, group.row)
 	}
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].priority != out[j].priority {
+			return out[i].priority < out[j].priority
+		}
 		if out[i].Kind != out[j].Kind {
 			return out[i].Kind < out[j].Kind
 		}
 		if out[i].Support != out[j].Support {
 			return out[i].Support < out[j].Support
 		}
-		return out[i].Connectivity < out[j].Connectivity
+		if out[i].Connectivity != out[j].Connectivity {
+			return out[i].Connectivity < out[j].Connectivity
+		}
+		if out[i].Context != out[j].Context {
+			return out[i].Context < out[j].Context
+		}
+		return out[i].Detail < out[j].Detail
 	})
 	return out
+}
+
+func summaryBehaviorContext(row SummaryBehavior) string {
+	context := row.SubjectNodeID
+	for _, source := range row.Sources {
+		if source.LogicalPath != "" {
+			context = source.LogicalPath
+			break
+		}
+	}
+	if row.Architecture != "" {
+		context = strings.TrimSpace(context + " [" + row.Architecture + "]")
+	}
+	return context
 }
 
 func summaryBehaviorResourceDetail(kind behavior.OperationKind, resources []string) string {

@@ -109,6 +109,7 @@ func arm64StackArrayOverwriteControl(t *testing.T, overwrite []uint32) behavior.
 	}
 	text := testMachOSection("__text", textVA, data)
 	file.Sections = append([]*macho.Section{text}, file.Sections...)
+	addTestMachOReadOnlyMappings(file)
 	var graph behavior.Graph
 	lookup := newMachOCallLookup(&graph, artifact.Content{NodeID: "node", LogicalPath: "inert-stack-array"}, "arm64")
 	_, truncated := extractArm64DirectCallsIndexed(lookup, file, text, data,

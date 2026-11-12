@@ -289,6 +289,147 @@ func TestReviewProjectionGroupsCapabilityAndArtifactContext(t *testing.T) {
 	}
 }
 
+func TestReviewGroupsRetainAllRenderedInstancesWithExactContexts(t *testing.T) {
+	rep := visualizationFixture()
+	baseOperation, baseCapability := rep.Operations[0], rep.Capabilities[0]
+	rep.Operations, rep.Capabilities = nil, nil
+	for index := 0; index < 40; index++ {
+		op := baseOperation
+		op.ID = fmt.Sprintf("operation-%d", index)
+		op.SubjectNodeID = fmt.Sprintf("node-%d", index%2+1)
+		op.Architecture = []string{"arm64", "x86_64"}[index%2]
+		op.Execution = behavior.ExecutionContext{Connectivity: behavior.ConnectivityConnected, ExecutionRootIDs: []string{fmt.Sprintf("root-%d", index)}}
+		op.ResourceBindings = behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, fmt.Sprintf("/usr/bin/inert-%d", index))))
+		rep.Operations = append(rep.Operations, op)
+		capability := baseCapability
+		capability.ID = fmt.Sprintf("capability-%d", index)
+		capability.SubjectNodeID = op.SubjectNodeID
+		capability.Execution = op.Execution
+		capability.ArchitectureScopes = []string{op.Architecture}
+		capability.OperationIDs = []string{op.ID}
+		capability.AffectedResources = []behavior.Resource{op.ResourceBindings[0].Resource}
+		rep.Capabilities = append(rep.Capabilities, capability)
+	}
+	options, adjustments, err := normalizeOptions(Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := buildDocument(rep, options, adjustments)
+	if len(doc.Projection.Capabilities) != 1 {
+		t.Fatalf("review groups = %#v", doc.Projection.Capabilities)
+	}
+	group := doc.Projection.Capabilities[0]
+	if group.Count != 40 || group.OperationCount != 40 || group.OperationCountLimited || len(group.MatchIDs) != maxReviewItems {
+		t.Fatalf("group counts = %#v", group)
+	}
+	instances := 0
+	for _, node := range doc.Nodes {
+		if node.Type != "capability" {
+			continue
+		}
+		if node.ReviewGroup != group.GroupID || node.RecordID == "" {
+			t.Fatalf("instance missing exact group reference: %#v", node)
+		}
+		instances++
+		fields := map[string]string{}
+		for _, detail := range node.Details {
+			fields[detail.Label] = detail.Value
+		}
+		if fields["Artifact path"] == "" || fields["Execution root IDs"] == "" || fields["Architecture scopes"] == "" || fields["Resources"] == "" {
+			t.Fatalf("instance context = %#v", fields)
+		}
+	}
+	if instances != 40 {
+		t.Fatalf("rendered grouped instances = %d", instances)
+	}
+}
+
+func TestReviewGroupMembershipKeepsRulesAndRuntimeCategoriesSeparate(t *testing.T) {
+	rep := visualizationFixture()
+	second := rep.Capabilities[0]
+	second.ID, second.RuleID = "capability-2", "different-rule"
+	rep.Capabilities = append(rep.Capabilities, second)
+	runtimeOperation := rep.Operations[0]
+	runtimeOperation.ID = "operation-runtime"
+	runtimeOperation.Qualifiers = map[string]string{"function_origin": "go-runtime-compiler"}
+	rep.Operations = append(rep.Operations, runtimeOperation)
+	runtimeCapability := rep.Capabilities[0]
+	runtimeCapability.ID, runtimeCapability.OperationIDs = "capability-runtime", []string{runtimeOperation.ID}
+	rep.Capabilities = append(rep.Capabilities, runtimeCapability)
+	projection, membership := buildVisualProjection(rep)
+	if len(projection.Capabilities) != 3 {
+		t.Fatalf("distinct rules or categories merged: %#v", projection.Capabilities)
+	}
+	groups := map[string]bool{}
+	for _, id := range []string{"capability-1", "capability-2", "capability-runtime"} {
+		group := membership["capability\x00"+id]
+		if group == "" || groups[group] {
+			t.Fatalf("incorrect group membership: %#v", membership)
+		}
+		groups[group] = true
+	}
+}
+
+func TestReviewNavigationRejectsAmbiguousCanonicalIDsOutsideView(t *testing.T) {
+	rep := visualizationFixture()
+	duplicate := rep.Capabilities[0]
+	rep.Capabilities = append(rep.Capabilities, duplicate)
+	options, adjustments, err := normalizeOptions(Options{MaxCapabilityMatches: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := buildDocument(rep, options, adjustments)
+	for _, node := range doc.Nodes {
+		if node.Type == "capability" && (node.RecordID != "" || node.ReviewGroup != "") {
+			t.Fatalf("ambiguous ID acquired an exact navigation target: %#v", node)
+		}
+	}
+}
+
+func TestReviewNavigationRejectsEscapedOversizedOrTruncatedIDs(t *testing.T) {
+	for _, test := range []struct {
+		name, id string
+		bytes    int
+	}{
+		{"control", "capability-\x1b[31m", 0},
+		{"invalid UTF-8", "capability-\xff", 0},
+		{"oversized", strings.Repeat("a", maxReferenceBytes+1), 0},
+		{"truncated", "capability-" + strings.Repeat("a", 50), 32},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rep := visualizationFixture()
+			rep.Capabilities[0].ID = test.id
+			options, adjustments, err := normalizeOptions(Options{MaxStringBytes: test.bytes})
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := buildDocument(rep, options, adjustments)
+			for _, node := range doc.Nodes {
+				if node.Type == "capability" && (node.RecordID != "" || node.ReviewGroup != "") {
+					t.Fatalf("display-transformed ID became an exact reference: %#v", node)
+				}
+			}
+		})
+	}
+}
+
+func TestReviewMembershipBoundsAndTypedIDs(t *testing.T) {
+	membership := make(map[string]string)
+	addReviewMembership(membership, "operation", "operation-group", []string{"shared"})
+	addReviewMembership(membership, "capability", "capability-group", []string{"shared"})
+	if membership["operation\x00shared"] != "operation-group" || membership["capability\x00shared"] != "capability-group" {
+		t.Fatalf("typed IDs collided: %#v", membership)
+	}
+	ids := make([]string, maxReferenceTailScan+1)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("id-%d", index)
+	}
+	addReviewMembership(membership, "operation", "bounded", ids)
+	if len(membership) != maxReferenceTailScan {
+		t.Fatalf("membership index size = %d", len(membership))
+	}
+}
+
 func TestInvokedTargetLinksUseTypedSources(t *testing.T) {
 	rep := visualizationFixture()
 	rep.InvokedTargets = append(rep.InvokedTargets,

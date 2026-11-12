@@ -237,6 +237,7 @@ func arm64ReceiverSpillControl(t *testing.T, afterStore []uint32) (behavior.Grap
 		testMachOSection("__cfstring", cfObject, object),
 		testMachOSection("__cstring", cfBacking, []byte(path)),
 	}}
+	addTestMachOReadOnlyMappings(file)
 	text := &macho.Section{SectionHeader: macho.SectionHeader{Addr: textVA, Size: uint64(len(data))}}
 	function := machoFunction{Name: "main", Start: textVA, End: textVA + uint64(len(data)), Reachable: true}
 	graph := behavior.Graph{}

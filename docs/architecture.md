@@ -94,6 +94,9 @@ Execution connectivity has three values:
 
 `CONNECTED` never means that a user launched the artifact, a host selected it
 on a real machine, or the operation succeeded.
+Native reachability uses the original instruction image and does not prove path
+feasibility. A syntactic call path can remain connected when code modification
+limits the separate operation analysis; that loss is recorded in coverage.
 
 Host adapters are deliberately narrow. They model a documented selection rule
 and reject unsupported arguments, ambiguous paths, dynamic values, malformed
@@ -381,6 +384,10 @@ Mach-O analysis follows the same layers as other formats:
    64-bit compiler spills and reloads. Stores from unknown values, stack/frame
    alias escape, branches, decode gaps, and function changes invalidate the
    affected state.
+   Imported API identities follow the documented loader contract; exact slot
+   or stub writes contradict it, while unresolved writes and interposition
+   remain runtime-binding limits. Concrete writable arguments additionally
+   require unchanged backing bytes across stores and calls.
 5. Recognizers promote only supported call and argument patterns into
    operations. Exact static `__cfstring` method arguments retain the register
    reference, CFString object, and length-delimited backing bytes. A closed set

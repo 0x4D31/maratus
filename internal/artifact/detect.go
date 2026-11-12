@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -188,7 +189,31 @@ func isZipArchive(data []byte) bool {
 }
 
 func hasTarMagic(data []byte) bool {
-	return len(data) >= 262 && bytes.Equal(data[257:262], []byte("ustar"))
+	const headerSize = 512
+	if len(data) < headerSize || !bytes.Equal(data[257:262], []byte("ustar")) {
+		return false
+	}
+	// A string at the magic offset alone can occur in ordinary source code.
+	// Validate the fixed-size first header without walking members or parsing
+	// extended headers. Both historic signed and POSIX unsigned checksums are
+	// accepted, as in archive/tar; the archive reader validates the rest.
+	field := bytes.Trim(data[148:156], " \x00")
+	if end := bytes.IndexByte(field, 0); end >= 0 {
+		field = field[:end]
+	}
+	checksum, err := strconv.ParseUint(string(field), 8, 32)
+	if err != nil {
+		return false
+	}
+	var unsigned, signed int64
+	for i, value := range data[:headerSize] {
+		if i >= 148 && i < 156 {
+			value = ' '
+		}
+		unsigned += int64(value)
+		signed += int64(int8(value))
+	}
+	return int64(checksum) == unsigned || int64(checksum) == signed
 }
 
 func hasUDIFMagic(data []byte) bool {

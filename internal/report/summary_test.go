@@ -291,7 +291,7 @@ func TestProjectSummarySurfacesOperationImplementationAndUnresolvedBinding(t *te
 	}
 }
 
-func TestProjectSummaryGroupsCapabilityAcrossNodesAndRetainsSources(t *testing.T) {
+func TestProjectSummaryKeepsCapabilityArtifactLineageSeparate(t *testing.T) {
 	rep := Report{
 		SchemaVersion: SchemaVersion, Tool: "maratus", ToolVersion: "test", Artifact: "fixture",
 		Evidence: []behavior.Evidence{
@@ -308,12 +308,103 @@ func TestProjectSummaryGroupsCapabilityAcrossNodesAndRetainsSources(t *testing.T
 		},
 	}
 	summary := ProjectSummary(rep)
-	if len(summary.Capabilities) != 1 {
-		t.Fatalf("capabilities were split by node: %#v", summary.Capabilities)
+	if len(summary.Capabilities) != 2 {
+		t.Fatalf("distinct artifacts were merged: %#v", summary.Capabilities)
 	}
-	item := summary.Capabilities[0]
-	if item.Count != 2 || !slices.Equal(item.SubjectNodeIDs, []string{"node-a", "node-b"}) || len(item.Sources) != 2 || !stringSliceContains(item.Implementations, "api: open") || !stringSliceContains(item.Unresolved, "source") {
-		t.Fatalf("grouped capability lineage = %#v", item)
+	for _, item := range summary.Capabilities {
+		if item.Count != 1 || len(item.SubjectNodeIDs) != 1 || len(item.Sources) != 1 || item.SubjectNodeIDs[0] != item.Sources[0].NodeID || !stringSliceContains(item.Implementations, "api: open") || !stringSliceContains(item.Unresolved, "source") {
+			t.Fatalf("capability lineage = %#v", item)
+		}
+	}
+}
+
+func TestProjectSummaryRetainsProducerAndAnalysisProvenance(t *testing.T) {
+	rep := Report{Tool: "maratus", ToolVersion: "test", ToolCommit: "0123456789abcdef", ToolModified: true, RulesetVersion: "rules-test", RuleCatalogDigest: strings.Repeat("a", 64), Analysis: AnalysisMetadata{Architecture: "arm64", MaxFileBytes: 1024, ExpandContainers: true, ZipPasswordSupplied: true}}
+	summary := ProjectSummary(rep)
+	if summary.ToolCommit != rep.ToolCommit || !summary.ToolModified || summary.RulesetVersion != rep.RulesetVersion || summary.RuleCatalogDigest != rep.RuleCatalogDigest || summary.Analysis != rep.Analysis {
+		t.Fatalf("summary lost producer or analysis provenance: %#v", summary)
+	}
+	var output bytes.Buffer
+	if err := WriteSummaryJSON(&output, rep); err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip Summary
+	if err := json.Unmarshal(output.Bytes(), &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.ToolCommit != rep.ToolCommit || roundTrip.Analysis != rep.Analysis {
+		t.Fatalf("JSON provenance = %#v", roundTrip)
+	}
+}
+
+func TestProjectSummarySeparatesExecutionAndArchitectureContexts(t *testing.T) {
+	rep := Report{}
+	for index, context := range []struct{ node, root, arch, scope, resource string }{
+		{"node-a", "root-a", "arm64", "scope-a", "/tmp/a"},
+		{"node-a", "root-b", "arm64", "scope-a", "/tmp/a"},
+		{"node-a", "root-a", "x86_64", "scope-b", "/tmp/a"},
+		{"node-b", "root-c", "arm64", "scope-c", "/tmp/b"},
+	} {
+		execution := behavior.ExecutionContext{Connectivity: behavior.ConnectivityConnected, ExecutionRootIDs: []string{context.root}, InvokedTargetIDs: []string{fmt.Sprintf("target-%d", index)}}
+		resource := behavior.NewResource(behavior.ResourceFile, context.resource)
+		opID := fmt.Sprintf("op-%d", index)
+		rep.Operations = append(rep.Operations, behavior.ModeledOperation{ID: opID, SubjectNodeID: context.node, ScopeID: context.scope, Architecture: context.arch, Kind: behavior.OperationProcessExecute, Support: behavior.SupportCorroborated, Execution: execution, ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, resource))})
+		rep.Capabilities = append(rep.Capabilities, behavior.CapabilityMatch{ID: fmt.Sprintf("cap-%d", index), RuleID: "test.execute", SubjectNodeID: context.node, Support: behavior.SupportCorroborated, Execution: execution, ArchitectureScopes: []string{context.arch}, AffectedResources: []behavior.Resource{resource}, OperationIDs: []string{opID}})
+	}
+	summary := ProjectSummary(rep)
+	if len(summary.ModeledBehavior) != 4 || len(summary.Capabilities) != 4 || len(summaryBehaviorTextRows(summary.ModeledBehavior)) != 4 {
+		t.Fatalf("summary merged execution owners or architecture: %#v", summary)
+	}
+	for _, row := range summary.ModeledBehavior {
+		if row.Count != 1 || len(row.Execution.ExecutionRootIDs) != 1 || len(row.Execution.InvokedTargetIDs) != 1 || row.Architecture == "" || row.ScopeID == "" {
+			t.Fatalf("behavior context = %#v", row)
+		}
+	}
+	for _, row := range summary.Capabilities {
+		if row.Count != 1 || len(row.SubjectNodeIDs) != 1 || len(row.Execution.ExecutionRootIDs) != 1 || len(row.ArchitectureScopes) != 1 || len(row.AffectedResources) != 1 {
+			t.Fatalf("capability context = %#v", row)
+		}
+	}
+}
+
+func TestSummaryRetainsRequestedArgumentsWithoutBindingExecutable(t *testing.T) {
+	op := behavior.ModeledOperation{ID: "op", Kind: behavior.OperationProcessExecute, Qualifiers: map[string]string{"command_argument": "printf inert", "unresolved_process_options": "launch options", "api": "exec"}, ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleExecutable, behavior.NewResource(behavior.ResourceFile, "")))}
+	summary := ProjectSummary(Report{Operations: []behavior.ModeledOperation{op}})
+	row := summary.ModeledBehavior[0]
+	if !slices.Equal(row.RequestedArguments, []string{"command argument: printf inert"}) || !slices.Contains(row.Unresolved, "launch options") || row.Resources[0].Resource.Value != "" {
+		t.Fatalf("requested argument was lost or promoted: %#v", row)
+	}
+	text := summaryBehaviorTextRows(summary.ModeledBehavior)[0].Detail
+	if !strings.Contains(text, "command argument: printf inert") || strings.Contains(text, "executable: printf inert") {
+		t.Fatalf("requested argument presentation = %q", text)
+	}
+}
+
+func TestSummaryGroupingRetainsRequestedArgumentBoundaries(t *testing.T) {
+	base := behavior.ModeledOperation{ID: "operation-a", Kind: behavior.OperationProcessExecute}
+	left, right := base, base
+	right.ID = "operation-b"
+	left.Qualifiers = map[string]string{"command_argument": "a\x00executable argument: b"}
+	right.Qualifiers = map[string]string{"command_argument": "a", "executable_argument": "b"}
+	if rows := projectBehavior(Report{Operations: []behavior.ModeledOperation{left, right}}); len(rows) != 2 {
+		t.Fatalf("requested operand boundaries were merged: %#v", rows)
+	}
+	first := behavior.ResourceBinding{Role: behavior.ResourceRoleSource, Resource: behavior.Resource{Kind: behavior.ResourceFile, Value: "x\x00y", Classifications: []behavior.ResourceClassification{"z"}}}
+	second := behavior.ResourceBinding{Role: behavior.ResourceRoleSource, Resource: behavior.Resource{Kind: behavior.ResourceFile, Value: "x", Classifications: []behavior.ResourceClassification{"y\x00z"}}}
+	if summaryBindingIdentity([]behavior.ResourceBinding{first}) == summaryBindingIdentity([]behavior.ResourceBinding{second}) {
+		t.Fatal("summary resource field boundaries collided")
+	}
+}
+
+func TestSummaryPrioritizesConcreteBehaviorBeforeUnresolvedInventory(t *testing.T) {
+	rep := Report{Operations: []behavior.ModeledOperation{
+		{ID: "generic-exec", Kind: behavior.OperationProcessExecute},
+		{ID: "known-file", Kind: behavior.OperationFileOpen, ResourceBindings: behavior.Bindings(behavior.Bind(behavior.ResourceRoleSource, behavior.NewResource(behavior.ResourceFile, "/tmp/inert")))},
+		{ID: "known-exec", Kind: behavior.OperationProcessExecute, Qualifiers: map[string]string{"command_argument": "printf inert"}},
+	}}
+	rows := projectBehavior(rep)
+	if len(rows) != 3 || rows[0].OperationIDs[0] != "known-exec" || rows[1].OperationIDs[0] != "known-file" || rows[2].OperationIDs[0] != "generic-exec" {
+		t.Fatalf("concrete behavior priority = %#v", rows)
 	}
 }
 

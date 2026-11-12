@@ -25,7 +25,7 @@ var (
 	reJSAssign   = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"']+)["']`)
 	rePyGetenv   = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:os\.)?(?:getenv|environ\.get)\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']\s*\)`)
 	reOSASet     = regexp.MustCompile(`(?i)^\s*set\s+([A-Za-z_][A-Za-z0-9_]*)\s+to\s+["']([^"']+)["']`)
-	reFetch      = regexp.MustCompile(`\b(fetch|Bun\.fetch|axios\.(?:get|post|put|patch|request)|requests\.(?:get|post|put|patch|request)|httpx\.(?:get|post|put|patch|request)|urllib\.request\.(?:urlopen|urlretrieve)|urllib2\.(?:urlopen|Request))\s*\(`)
+	reFetch      = regexp.MustCompile(`\b(fetch|Bun\.fetch|axios\.(?:get|post|put|patch|request)|requests\.(?:get|post|put|patch|request)|httpx\.(?:get|post|put|patch|request)|urllib\.request\.(?:urlopen|urlretrieve)|urllib2\.urlopen)\s*\(`)
 	reChmodMode  = regexp.MustCompile(`(?:0o[0-7]+|\b[0-7]{3,4}\b)`)
 	reNativeExec = regexp.MustCompile(`\b(posix_spawn|execve|system|NSTask|Process\s*\(|NSAppleScript|do shell script|osascript)\b`)
 )
@@ -2640,7 +2640,7 @@ func languageNetworkCallMarkers(language string) []string {
 			"requests.get(", "requests.post(", "requests.put(", "requests.patch(", "requests.request(",
 			"httpx.get(", "httpx.post(", "httpx.put(", "httpx.patch(", "httpx.request(",
 			"urllib.request.urlopen(", "urllib.request.urlretrieve(",
-			"urllib2.urlopen(", "urllib2.Request(",
+			"urllib2.urlopen(",
 		}
 	case "javascript", "jxa":
 		return []string{
@@ -2717,17 +2717,20 @@ func pythonNetworkCallBinding(line string, lineNo int, bindings *pythonStableAPI
 }
 
 func pythonNetworkArgumentsSupported(canonical string, arguments []string) bool {
+	switch canonical {
+	case "urllib.request.urlopen", "urllib2.urlopen":
+		// Retain the common documented profile: context is keyword-only,
+		// and legacy CA-file options remain outside this version-neutral set.
+		return pythonSignature(1, 3, 0, "url", "data", "timeout", "context").accepts(arguments)
+	case "urllib.request.urlretrieve":
+		return pythonSignature(1, 4, 0, "url", "filename", "reporthook", "data").accepts(arguments)
+	}
 	minimum := 1
 	destinationIndex := 0
 	destinationParameter := "url"
 	if canonical == "requests.request" || canonical == "httpx.request" {
 		minimum = 2
 		destinationIndex = 1
-	}
-	if canonical == "urllib.request.urlopen" || canonical == "urllib2.urlopen" {
-		destinationParameter = "url"
-	} else if canonical == "urllib.request.urlretrieve" {
-		destinationParameter = "url"
 	}
 	if len(arguments) < minimum || len(arguments) > maxTextStringExpressionArguments {
 		return false

@@ -25,6 +25,7 @@ const htmlPrefix = `<!doctype html>
 @media(max-width:560px){.header-actions{width:100%;margin-left:0}.theme-toggle{margin-left:auto}.review-card,.review-limitations{padding-left:.68rem;padding-right:.68rem}.review-detail>summary span{max-width:44%}}
 @media(min-width:561px) and (max-width:900px){.overview-strip{grid-template-columns:repeat(4,minmax(0,1fr));gap:.4rem;padding:.55rem .65rem}.metric{padding:.5rem .58rem}.metric strong{font-size:.92rem}.metric span{font-size:.68rem}}
 @media(prefers-reduced-motion:reduce){.review-detail>summary:after,.review-limitations>summary:after{transition:none}}
+.finding-instances{margin-top:.45rem;min-width:0}.finding-instances>summary,.finding-instance>summary{cursor:pointer;color:var(--brand);overflow-wrap:anywhere}.finding-instance{padding:.55rem 0;border-top:1px solid var(--line);margin-top:.4rem;min-width:0}.finding-instance .detail-list{margin:.6rem 0;overflow-wrap:anywhere}.finding-instance summary{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.finding-instance .review-action{margin-top:0}
 </style>
 </head>
 <body>
@@ -108,6 +109,15 @@ const htmlSuffix = `</script>
   const search = document.getElementById("search"), support = document.getElementById("support");
   const connectivity = document.getElementById("connectivity"), statusFilter = document.getElementById("status");
   const byID = new Map(data.nodes.map(node => [node.id, node]));
+  const byRecord = new Map(), byReviewGroup = new Map();
+  data.nodes.forEach(node => {
+    if (!node.record_id) return;
+    byRecord.set(node.type + "\u0000" + node.record_id, node);
+    if (node.review_group) {
+      if (!byReviewGroup.has(node.review_group)) byReviewGroup.set(node.review_group, []);
+      byReviewGroup.get(node.review_group).push(node);
+    }
+  });
   const searchIndex = new Map(data.nodes.map(node => [node.id, JSON.stringify(node).toLowerCase()]));
   const summary = data.summary || {};
   const projection = data.projection || {};
@@ -136,7 +146,35 @@ const htmlSuffix = `</script>
   graphTab.addEventListener("click", () => setPage("graph"));
 
   function reviewEmpty(container, text) { const item = document.createElement("p"); item.className = "empty-review"; item.textContent = text; container.append(item); }
-  function exactEvidenceQuery(ids, fallback) { return (ids || []).find(Boolean) || fallback || ""; }
+  function exploreRecord(node) {
+    search.value = ""; support.value = ""; connectivity.value = ""; statusFilter.value = "";
+    setMode("full"); setPage("graph");
+    state.selected = node.id; state.focused = node.id; state.refocus = true; state.neighborhood = true; render();
+  }
+  function addFindingInstances(item, selection) {
+    const nodes = selection.group ? (byReviewGroup.get(selection.group) || []) : [byRecord.get(selection.type + "\u0000" + selection.id)].filter(Boolean);
+    const total = selection.count || nodes.length;
+    if (!nodes.length) { reviewEmpty(item, "Backing instances are outside this bounded HTML view. Inspect the canonical JSON report."); return; }
+    const instances = document.createElement("details"); instances.className = "finding-instances";
+    const heading = document.createElement("summary"); heading.textContent = "Review " + nodes.length + (nodes.length < total ? " of " + total : "") + (total === 1 ? " instance" : " instances"); instances.append(heading);
+    let populated = false;
+    instances.addEventListener("toggle", () => {
+      if (!instances.open || populated) return;
+      populated = true;
+      nodes.forEach(node => {
+        const entry = document.createElement("details"); entry.className = "finding-instance";
+        const label = document.createElement("summary");
+        const context = (node.details || []).filter(row => ["Artifact path", "Architecture", "Architecture scopes", "Execution root IDs"].includes(row.label)).map(row => row.value);
+        label.textContent = [node.record_id].concat(context).filter(Boolean).join(" · "); entry.append(label);
+        const fields = document.createElement("dl"); fields.className = "detail-list";
+        (node.details || []).forEach(row => { const term = document.createElement("dt"), value = document.createElement("dd"); term.textContent = row.label; value.textContent = row.value; fields.append(term, value); }); entry.append(fields);
+        const action = document.createElement("button"); action.type = "button"; action.className = "review-action"; action.textContent = "Open this instance in graph"; action.addEventListener("click", () => exploreRecord(node)); entry.append(action);
+        instances.append(entry);
+      });
+      if (nodes.length < total) reviewEmpty(instances, "Other instances are outside this bounded HTML view. Inspect the canonical JSON report.");
+    });
+    item.append(instances);
+  }
   function addReviewFinding(container, titleText, metaParts, badges, query, tone) {
     const item = document.createElement("article"); item.className = "finding"; if (tone) item.dataset.tone = tone;
     const head = document.createElement("div"); head.className = "finding-head";
@@ -146,7 +184,8 @@ const htmlSuffix = `</script>
     head.append(title, badgeBox); item.append(head);
     const meta = (metaParts || []).filter(Boolean).join(" · ");
     if (meta) { const detail = document.createElement("div"); detail.className = "finding-meta"; detail.textContent = meta; item.append(detail); }
-    if (query) { const action = document.createElement("button"); action.type = "button"; action.className = "review-action"; action.textContent = "Explore evidence"; action.addEventListener("click", () => { search.value = query; setMode("full"); setPage("graph"); }); item.append(action); }
+    if (query && typeof query === "object") addFindingInstances(item, query);
+    else if (query) { const action = document.createElement("button"); action.type = "button"; action.className = "review-action"; action.textContent = "Search related facts"; action.addEventListener("click", () => { search.value = query; setMode("full"); setPage("graph"); }); item.append(action); }
     container.append(item);
   }
 
@@ -155,15 +194,15 @@ const htmlSuffix = `</script>
     const network = document.getElementById("review-network"), observables = document.getElementById("review-observables"), coverage = document.getElementById("review-coverage");
     const activations = projection.conditional_activation || [];
     if (!activations.length) reviewEmpty(activation, "No trusted static host-selection or execution-root relationship was established.");
-    activations.forEach(item => addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter], [item.connectivity], item.name || item.interpreter || item.kind, "activation"));
+    activations.forEach(item => addReviewFinding(activation, item.name || item.interpreter || item.kind, [item.kind, item.interpreter], [item.connectivity], {type: item.kind.split(":")[0], id: item.id, count: 1}, "activation"));
     const capabilityItems = projection.capabilities || [], runtimeCapabilityItems = capabilityItems.filter(item => item.category === "runtime-support"), technicalCapabilityItems = capabilityItems.filter(item => item.category === "technical-primitive"), behavioralCapabilityItems = capabilityItems.filter(item => item.category === "behavior");
     if (!behavioralCapabilityItems.length) reviewEmpty(capabilities, capabilityItems.length ? "No higher-level behavioral capability was established. Technical and runtime inventories remain available below." : "No operation-backed capability matches. This is not a safety verdict.");
     document.getElementById("review-capabilities-summary").textContent = behavioralCapabilityItems.length ? countLabel(behavioralCapabilityItems.length, "finding", "findings") : "No higher-level finding established";
     const renderCapability = (container, item) => {
       const implementations = (item.implementations || []).map(value => value.replace(/^[^:]+:\s*/, ""));
-      const operationCount = (item.operation_ids || []).length;
-      const meta = [item.namespace, item.count > 1 ? item.count + " matches" : "", operationCount ? "backed by " + operationCount + (operationCount === 1 ? " operation" : " operations") : "", implementations.length ? "via " + implementations.join(", ") : "", (item.resources || []).length ? "resources: " + item.resources.join(", ") : "", (item.unresolved || []).length ? "unresolved: " + item.unresolved.join(", ") : ""];
-      addReviewFinding(container, item.title, meta, [].concat(item.attack || [], [item.support, item.connectivity]), exactEvidenceQuery(item.match_ids, item.title), "capability");
+      const operationCount = item.operation_count || 0;
+      const meta = [item.namespace, item.count > 1 ? item.count + " matches" : "", operationCount ? "backed by " + (item.operation_count_limited ? "at least " : "") + operationCount + (operationCount === 1 ? " operation" : " operations") : "", implementations.length ? "via " + implementations.join(", ") : "", (item.resources || []).length ? "resources: " + item.resources.join(", ") : "", (item.unresolved || []).length ? "unresolved: " + item.unresolved.join(", ") : ""];
+      addReviewFinding(container, item.title, meta, [].concat(item.attack || [], [item.support, item.connectivity]), {group: item.group_id, count: item.count}, "capability");
     };
     behavioralCapabilityItems.forEach(item => renderCapability(capabilities, item));
     const technicalDetail = document.getElementById("review-technical-capabilities-detail");
@@ -188,8 +227,8 @@ const htmlSuffix = `</script>
     const behaviors = projection.modeled_behavior || [];
     if (!behaviors.length) reviewEmpty(behaviorList, "No modeled operations were retained.");
     behaviors.forEach(item => {
-      const meta = [].concat(item.implementations || [], item.resources || [], (item.unresolved || []).map(value => value + " unresolved"));
-      addReviewFinding(behaviorList, item.kind + (item.count > 1 ? " × " + item.count : ""), meta, [item.support, item.connectivity], exactEvidenceQuery(item.operation_ids, item.kind), "operation");
+      const meta = [].concat(item.requested_arguments || [], item.resources || [], (item.unresolved || []).map(value => value + " unresolved"), item.implementations || []);
+      addReviewFinding(behaviorList, item.kind + (item.count > 1 ? " × " + item.count : ""), meta, [item.support, item.connectivity], {group: item.group_id, count: item.count}, "operation");
     });
     const networkItems = projection.network_activity || [];
     document.getElementById("review-activation-summary").textContent = activations.length ? countLabel(activations.length, "conditional path", "conditional paths") : "No trusted static path established";
