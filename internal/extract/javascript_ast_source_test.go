@@ -39,9 +39,8 @@ func TestJavaScriptASTSourceSharedSemanticsAndEvidence(t *testing.T) {
 	}
 }
 
-func TestJavaScriptASTSourceRecoversLeadingIsolatedIIFE(t *testing.T) {
-	source := "\n;\n(function(){var cp=require(\"child_process\");cp.execSync(\"/usr/bin/id\");})();\n" +
-		`const later=require("child_process");capture(later);`
+func TestJavaScriptASTSourcePreservesArtifactOffsets(t *testing.T) {
+	source := "\n;\n(function(){var cp=require(\"child_process\");cp.execSync(\"/usr/bin/id\");})();\n"
 	var graph behavior.Graph
 	content := artifact.Content{NodeID: "node-js", LogicalPath: "fixture.js", SemanticLanguage: "javascript", ByteOffsetBase: 100}
 	extractJavaScriptASTSource(&graph, content, source)
@@ -85,15 +84,17 @@ func TestJavaScriptASTSourceRecoversLeadingIsolatedIIFE(t *testing.T) {
 	}
 }
 
-func TestJavaScriptASTSourceLeadingIIFERequiresIsolatedIdentity(t *testing.T) {
+func TestJavaScriptASTSourceIIFEPreservesWholeFileIdentity(t *testing.T) {
 	for _, source := range []string{
+		`;(function(){const cp=require("child_process");cp.execSync("/bin/echo inert");})();const later=require("child_process");capture(later);`,
+		`;(function(){const cp=require("child_process");cp.execSync("/bin/echo inert");})();function require(){return {execSync(){}};}`,
+		`;(async function(){await tick();const cp=require("child_process");cp.execSync("/bin/echo inert");})();const later=require("child_process");later.execSync=other;`,
 		`;(function(){var cp=require("child_process");capture(cp);cp.execSync("/usr/bin/id");})();const later=require("child_process");capture(later);`,
 		`const earlier=require("child_process");capture(earlier);(function(){var cp=require("child_process");cp.execSync("/usr/bin/id");})();`,
 		`;(function(cp){cp.execSync("/usr/bin/id");})(require("child_process"));`,
-		`;(function(){var cp=require("child_process"),padding="` + strings.Repeat("x", maxJavaScriptLeadingIIFEBytes) + `";cp.execSync("/usr/bin/id");})();const later=require("child_process");capture(later);`,
 	} {
 		if graph := javaScriptASTExtract(source); len(graph.Operations) != 0 {
-			t.Fatalf("open, non-leading, parameterized, or oversized IIFE produced operations: %#v", graph.Operations)
+			t.Fatalf("unproved wrapper identity produced operations: %#v", graph.Operations)
 		}
 	}
 }
@@ -131,6 +132,27 @@ func TestJavaScriptASTSourceKeepsOptionEffectsUnknown(t *testing.T) {
 	for _, binding := range graph.Operations[0].ResourceBindings {
 		if binding.Resource.Value != "" {
 			t.Fatalf("unknown launch options retained a concrete executable: %#v", binding)
+		}
+	}
+}
+
+func TestJavaScriptASTCapturedNamespaceRetainsCoverageWithoutInvalidFacts(t *testing.T) {
+	for _, body := range []string{
+		`function outer(){const fs=require("fs");function inner(){fs.readFileSync("/tmp/inert");}}`,
+		`function outer(){const cp=require("child_process");function inner(){cp.execSync("/bin/echo inert");}}`,
+	} {
+		graph := javaScriptASTExtract(body)
+		if len(graph.Operations) != 0 || graph.InvalidItemsDropped != 0 || !hasPartialCoverageScope(graph.Coverage, "javascript-ast-binding-context") {
+			t.Fatalf("captured namespace lost its explicit boundary: %#v", graph)
+		}
+	}
+	for _, source := range []string{
+		`const fs=require("fs");function inner(){fs.readFileSync("/tmp/inert");}`,
+		`function inner(){const fs=require("fs");fs.readFileSync("/tmp/inert");}`,
+	} {
+		graph := javaScriptASTExtract(source)
+		if len(graph.Operations) != 1 || graph.InvalidItemsDropped != 0 {
+			t.Fatalf("compatible namespace evidence was rejected: %#v", graph)
 		}
 	}
 }

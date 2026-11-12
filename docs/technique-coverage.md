@@ -53,6 +53,10 @@ Unpaired UTF-16 surrogates remain unresolved rather than becoming replacement
 characters. A proved process API request remains visible when its command has
 no more specific supported shell semantics; that alone does not resolve an
 executable or establish downstream behavior.
+AST namespace proofs from incompatible function scopes remain observational
+with explicit coverage. Whole-file loader shadowing, namespace escapes, and
+mutation checks also apply to leading IIFEs; a wrapper is not reparsed in
+isolation to bypass those checks.
 
 JavaScript HTTP API destinations require a complete supported URL operand.
 URLs found inside prose or unsupported values remain observations; they are
