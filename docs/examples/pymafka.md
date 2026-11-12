@@ -1,8 +1,9 @@
-# Pymafka: Python source and download-to-interpreter flow
+# Pymafka: Python platform branches, executable operands, and pipe flow
 
 This archive includes a Python source distribution and an x86_64 Mach-O
-payload. The excerpt highlights behavior recovered from `setup.py` inside the
-source distribution.
+payload. Maratus recovers a Darwin branch that invokes `/var/tmp/zad`, plus a
+separate Linux download-to-`bash` pipeline. Keeping those branches distinct
+matters when reading the archive's combined findings.
 
 - Input: `Pymafka.zip`
 - Archive SHA-256: `240924898480a88fe40bd98644b62aed9d5e0a9d522b3ae73faaabf8d6cc7e35`
@@ -31,25 +32,57 @@ NETWORK EVIDENCE (1 path)
     via curl → curl/libcurl → libcurl-selected TLS backend
 ```
 
-## What the report establishes
+## Darwin branch: concrete operands and source locations
 
-In `pymafka-1.0/setup.py`, line 42 supplies a subprocess command that downloads
-content with `curl` and pipes it into `bash`. Maratus retains separate
-`network.download` and `interpreter.invoke` operations with the same source
-lineage; the flow-backed rule produces the interpreter capability above.
-`DIRECT` describes that static source evidence. It does not mean that a
-download or execution was observed.
+The source member is `pymafka-3.0.tar.gz!pymafka-1.0/setup.py`. Retained guard
+evidence at line 44 is `if platform.system()=="Darwin":`. These operations
+come from the following source lines in that branch:
 
-Other source calls retain `chmod` and `/var/tmp/zad` as executable operands.
-The `chmod` argument vector remains dynamic or unsupported. URLs found as
-unlinked literals appear separately as static observables; their presence
-does not establish communication.
+| Line | Operation ID | Modeled operation and bound operand |
+| --- | --- | --- |
+| 46 | `operation-0007` | `file.metadata.query` on `/var/tmp/zad`, from `os.path.exists` |
+| 52 | `operation-0008` | `process.execute` with executable `chmod`; dynamic or unsupported argv remains unresolved |
+| 53 | `operation-0009` | `file.write` with local output `/tmp/log` |
+| 53 | `operation-0010` | `process.execute` with executable `/var/tmp/zad` |
 
-The source contains platform-dependent branches. This report does not prove
-which branch would run on a particular host. It records no trusted package
-installation root, and the bundled Mach-O has limited native coverage.
-The excerpt is therefore a source-behavior result, not a complete account of
-the payload or an observed installation.
+These operations have `CORROBORATED` support and `UNKNOWN` connectivity.
+Their evidence includes the source lines and the resolved import binding for
+`os` or `subprocess`. This identifies the executable and log path retained
+from the Darwin code without claiming its chmod arguments were recovered.
+
+## Linux branch: an explicit download-to-interpreter relation
+
+Line 41 contains the separate `Linux` guard. Its line 42 subprocess command
+downloads content with `curl` and pipes it into `bash`. The report retains
+`operation-0004` (`network.download`) and `operation-0005`
+(`interpreter.invoke`, executable `bash`). Their shared evidence is the
+subprocess import binding and the exact command source line.
+
+This is the complete canonical relation record, with indentation normalized:
+
+```json
+{
+  "id": "relation-0001",
+  "kind": "pipes-to",
+  "from": {"kind": "operation", "id": "operation-0004"},
+  "to": {"kind": "operation", "id": "operation-0005"},
+  "evidence_ids": ["ev-0013", "ev-0016"],
+  "support": "DIRECT",
+  "execution": {"connectivity": "UNKNOWN"}
+}
+```
+
+The `macos.download-pipe-interpreter` rule uses those operations and that
+relation. Its catalog name does not make this source branch macOS-specific.
+`DIRECT` describes static source evidence, not an observed download or execution.
+
+## Interpretation
+
+The combined report does not establish a Linux-to-Darwin sequence or determine
+branch feasibility on a particular host. It records no trusted package
+installation root. Unlinked URLs remain static observables, and the bundled
+Mach-O has limited native coverage. The source findings do not establish the
+downloaded payload's behavior or a successful installation.
 
 ## Inspect a separately obtained copy
 
