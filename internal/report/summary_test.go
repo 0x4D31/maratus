@@ -527,3 +527,17 @@ func TestProjectSummaryRetainsExactNonRuntimeGoCallContext(t *testing.T) {
 		t.Fatalf("Go code context lost exact call/scope identity: %#v", summary.CodeContext)
 	}
 }
+
+func TestSummaryDeclaredEventsBelongToManifest(t *testing.T) {
+	rep := Report{
+		ExecutionRoots: []behavior.ExecutionRoot{{ID: "root-a", Kind: "vscode-extension-main", DeclarationNodeID: "manifest-a", StartNodeID: "entry"}},
+		Features: []behavior.Feature{
+			{ID: "feature-b", NodeID: "manifest-b", Key: "vscode.extension.activation_event", Value: "onUri"},
+			{ID: "feature-a", NodeID: "manifest-a", Key: "vscode.extension.activation_event", Value: "onStartupFinished"},
+		},
+	}
+	context := ProjectSummary(rep).ConditionalActivation[0].Context
+	if len(context) != 1 || context[0].FeatureID != "feature-a" || context[0].Value != "onStartupFinished" {
+		t.Fatalf("wrong manifest context: %#v", context)
+	}
+}

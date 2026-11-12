@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	visualizationSchema = "maratus.visualization.v0.14"
+	visualizationSchema = "maratus.visualization.v0.15"
 	maxReferenceBytes   = 512
 	maxDetailRows       = 20
 	maxListItems        = 12
@@ -63,6 +63,8 @@ type visualSummary struct {
 }
 
 type visualProjection struct {
+	SelectedMembers       string                       `json:"selected_members,omitempty"`
+	ArtifactType          string                       `json:"artifact_type"`
 	SchemaVersion         string                       `json:"schema_version"`
 	ConditionalActivation []visualProjectionActivation `json:"conditional_activation"`
 	ModeledBehavior       []visualProjectionBehavior   `json:"modeled_behavior"`
@@ -76,11 +78,12 @@ type visualProjection struct {
 }
 
 type visualProjectionActivation struct {
-	ID           string `json:"id"`
-	Kind         string `json:"kind"`
-	Name         string `json:"name,omitempty"`
-	Interpreter  string `json:"interpreter,omitempty"`
-	Connectivity string `json:"connectivity,omitempty"`
+	Context      []string `json:"context,omitempty"`
+	ID           string   `json:"id"`
+	Kind         string   `json:"kind"`
+	Name         string   `json:"name,omitempty"`
+	Interpreter  string   `json:"interpreter,omitempty"`
+	Connectivity string   `json:"connectivity,omitempty"`
 }
 
 type visualProjectionBehavior struct {
@@ -162,7 +165,7 @@ func buildVisualProjection(rep report.Report) (visualProjection, map[string]stri
 	summary := report.ProjectSummary(rep)
 	membership := make(map[string]string)
 	projection := visualProjection{
-		SchemaVersion:         summary.SchemaVersion,
+		SchemaVersion: summary.SchemaVersion, ArtifactType: terminal.EscapeTruncate(summary.Overview.ArtifactType, maxReferenceBytes), SelectedMembers: summary.Overview.SelectedMemberTypes(),
 		ConditionalActivation: make([]visualProjectionActivation, 0, min(len(summary.ConditionalActivation), maxReviewItems)),
 		ModeledBehavior:       make([]visualProjectionBehavior, 0, min(len(summary.ModeledBehavior), maxReviewItems)),
 		Capabilities:          make([]visualProjectionCapability, 0, min(len(summary.Capabilities), maxReviewItems)),
@@ -174,8 +177,20 @@ func buildVisualProjection(rep report.Report) (visualProjection, map[string]stri
 		Coverage:              make([]visualProjectionCoverage, 0, min(len(summary.CoverageGapsAndLimits), maxReviewItems)),
 	}
 	for _, item := range summary.ConditionalActivation[:min(len(summary.ConditionalActivation), maxReviewItems)] {
+		var details []string
+		if item.EntryPath != "" {
+			details = append(details, terminal.EscapeTruncate(item.EntryPath, maxReferenceBytes))
+		}
+		for _, arg := range item.Arguments[:min(len(item.Arguments), 6)] {
+			if arg != item.EntryPath {
+				details = append(details, terminal.EscapeTruncate(arg, maxReferenceBytes))
+			}
+		}
+		for _, fact := range item.Context[:min(len(item.Context), 8)] {
+			details = append(details, fact.Label+" "+terminal.EscapeTruncate(fact.Value, maxReferenceBytes))
+		}
 		projection.ConditionalActivation = append(projection.ConditionalActivation, visualProjectionActivation{
-			ID:   terminal.EscapeTruncate(item.ID, maxReferenceBytes),
+			Context: details, ID: terminal.EscapeTruncate(item.ID, maxReferenceBytes),
 			Kind: terminal.EscapeTruncate(item.Kind, maxReferenceBytes), Name: terminal.EscapeTruncate(item.Name, maxReferenceBytes),
 			Interpreter: terminal.EscapeTruncate(item.Interpreter, maxReferenceBytes), Connectivity: terminal.EscapeTruncate(string(item.Execution.Connectivity), maxReferenceBytes),
 		})

@@ -17,6 +17,7 @@ const (
 )
 
 type xcodeRunScriptPhase struct {
+	flags   []struct{ name, value string }
 	id      string
 	name    string
 	shell   string
@@ -74,6 +75,11 @@ func extractXcodeProject(graph *behavior.Graph, content artifact.Content) {
 			shell:   plistx.String(object, "shellPath"),
 			script:  xcodeExactString(object["shellScript"]),
 			targets: sortedUniqueXcodeTargetReferences(referenced[phaseID]),
+		}
+		for _, field := range []string{"runOnlyForDeploymentPostprocessing", "alwaysOutOfDate"} {
+			if v := xcodeExactString(object[field]); v == "0" || v == "1" {
+				phase.flags = append(phase.flags, struct{ name, value string }{field, v})
+			}
 		}
 		if phase.name == "" {
 			phase.name = "Run Script " + phase.id
@@ -211,6 +217,9 @@ func extractXcodeRunScriptPhase(graph *behavior.Graph, content artifact.Content,
 	if phase.shell != "" {
 		evidenceValue += "; shell " + phase.shell
 	}
+	for _, flag := range phase.flags {
+		evidenceValue += "; " + flag.name + "=" + flag.value
+	}
 	evidenceID := graph.AddEvidence(behavior.Evidence{
 		NodeID:   content.NodeID,
 		ScopeID:  content.ScopeID,
@@ -265,6 +274,9 @@ func extractXcodeRunScriptPhase(graph *behavior.Graph, content artifact.Content,
 		}
 		if targets != "" {
 			qualifiers["targets"] = targets
+		}
+		for _, flag := range phase.flags {
+			qualifiers[flag.name] = flag.value
 		}
 		graph.AddFeature(behavior.Feature{
 			NodeID:      content.NodeID,
