@@ -303,3 +303,23 @@ func extractShellCommandFixture(command string) behavior.Graph {
 	_ = graph.Sort()
 	return graph
 }
+
+func TestDefaultsFileDomainsSelectPlistExtension(t *testing.T) {
+	for _, domain := range []string{"/tmp/Prefs", "/tmp/Prefs.plist", "~/Library/Preferences/unit", "/tmp/Prefs.PLIST"} {
+		resource, _, ok := plistModificationTarget("defaults", []string{"defaults", "write", domain, "Key", "value"})
+		want := domain
+		if !strings.HasSuffix(want, ".plist") {
+			want += ".plist"
+		}
+		if !ok || resource.Kind != behavior.ResourceFile || resource.Value != want {
+			t.Fatalf("domain %q selected %#v", domain, resource)
+		}
+	}
+}
+
+func TestDefaultsUnresolvedPathDoesNotBecomeSyntheticPlist(t *testing.T) {
+	resource, _, ok := plistModificationTarget("defaults", []string{"defaults", "write", "/tmp/%@", "Key", "value"})
+	if !ok || resource.Value != "" {
+		t.Fatalf("unresolved path became concrete: %#v", resource)
+	}
+}

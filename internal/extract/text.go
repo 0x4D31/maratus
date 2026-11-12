@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2681,6 +2682,23 @@ func pythonNetworkCallBinding(line string, lineNo int, bindings *pythonStableAPI
 			calls = calls[:maxPythonAPICallsPerLine]
 		}
 	}
+	networkCalls := 0
+	for _, call := range calls {
+		name := call.value
+		parts := strings.SplitN(name, ".", 2)
+		if len(parts) == 2 {
+			if proof, ok := bindings.bindings[parts[0]]; ok {
+				name = proof.canonical + "." + parts[1]
+			}
+		}
+		if _, _, ok := pythonNetworkCallLocation(name + "("); ok {
+			networkCalls++
+		}
+	}
+	if networkCalls > 1 {
+		bindings.unsupportedCalls = true
+		return "", canonicalLine, true, false
+	}
 	for _, call := range calls {
 		components := strings.Split(call.value, ".")
 		if len(components) < 2 {
@@ -2725,24 +2743,36 @@ func pythonNetworkArgumentsSupported(canonical string, arguments []string) bool 
 	case "urllib.request.urlretrieve":
 		return pythonSignature(1, 4, 0, "url", "filename", "reporthook", "data").accepts(arguments)
 	}
-	minimum := 1
-	destinationIndex := 0
-	destinationParameter := "url"
-	if canonical == "requests.request" || canonical == "httpx.request" {
-		minimum = 2
-		destinationIndex = 1
+	names := []string{"url"}
+	maximum, required := 1, 1
+	if strings.HasSuffix(canonical, ".request") {
+		names = []string{"method", "url"}
+		maximum, required = 2, 2
 	}
-	if len(arguments) < minimum || len(arguments) > maxTextStringExpressionArguments {
-		return false
+	if strings.HasPrefix(canonical, "requests.") {
+		switch canonical {
+		case "requests.get":
+			names = append(names, "params")
+			maximum = 2
+		case "requests.post":
+			names = append(names, "data", "json")
+			maximum = 3
+		case "requests.put", "requests.patch":
+			names = append(names, "data")
+			maximum = 2
+		}
+		for _, name := range []string{"params", "data", "json", "headers", "cookies", "files", "auth", "timeout", "allow_redirects", "proxies", "verify", "stream", "cert"} {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	} else {
+		names = append(names, "params", "headers", "cookies", "auth", "proxy", "timeout", "follow_redirects", "verify", "trust_env")
+		if canonical != "httpx.get" {
+			names = append(names, "content", "data", "files", "json")
+		}
 	}
-	positional, keywords, stable := pythonStableArgumentShape(arguments)
-	if !stable || len(positional) <= destinationIndex && keywords[destinationParameter] == "" {
-		return false
-	}
-	if destinationIndex == 1 && len(positional) == 0 && keywords["method"] == "" {
-		return false
-	}
-	return len(positional) <= destinationIndex || keywords[destinationParameter] == ""
+	return pythonSignature(required, maximum, 0, names...).accepts(arguments)
 }
 
 func pythonMarkerLocation(line, marker string) int {
@@ -2829,20 +2859,55 @@ func languageUploadCall(language, line string) bool {
 	lower := strings.ToLower(line)
 	switch language {
 	case "python":
-		if strings.Contains(lower, "urllib.request.urlopen(") {
-			return pythonURLopenUploadPayload(lower)
-		}
-		if !uploadPayloadIndicator(lower) {
+		marker, open, ok := pythonNetworkCallLocation(line)
+		if !ok {
 			return false
 		}
-		return strings.Contains(lower, "requests.post(") ||
-			strings.Contains(lower, "requests.put(") ||
-			strings.Contains(lower, "requests.patch(") ||
-			strings.Contains(lower, "httpx.post(") ||
-			strings.Contains(lower, "httpx.put(") ||
-			strings.Contains(lower, "httpx.patch(") ||
-			(strings.Contains(lower, "requests.request(") && uploadMethodIndicator(lower)) ||
-			(strings.Contains(lower, "httpx.request(") && uploadMethodIndicator(lower))
+		content, _, exact, _ := exactPythonCallContent(line, open, maxPythonAPICallBytes)
+		if !exact {
+			return false
+		}
+		args, limited, malformed := exactPythonArguments(content, maxTextStringExpressionArguments)
+		if limited || malformed {
+			return false
+		}
+		positional, keywords, stable := pythonStableArgumentShape(args)
+		if !stable {
+			return false
+		}
+		method := strings.TrimSuffix(marker, "(")
+		payloadIndex := 1
+		switch method {
+		case "urllib.request.urlopen", "urllib2.urlopen":
+		case "requests.get":
+			payloadIndex = -1
+		case "requests.post", "requests.put", "requests.patch", "httpx.post", "httpx.put", "httpx.patch":
+		case "requests.request", "httpx.request":
+
+			payloadIndex = 2
+		default:
+			return false
+		}
+		// Positional bodies are supported by urllib and requests. HTTPX
+		// convenience methods require keyword-only request bodies.
+		if payloadIndex >= 0 && !strings.HasPrefix(method, "httpx.") && len(positional) > payloadIndex && pythonPayloadSupplied(positional[payloadIndex]) {
+			return true
+		}
+		if method == "requests.post" && len(positional) > 2 && pythonPayloadSupplied(positional[2]) {
+			return true
+		}
+		for _, name := range []string{"data", "json", "files", "content"} {
+			if strings.HasPrefix(method, "urllib") && name != "data" {
+				continue
+			}
+			if name != "json" && (keywords[name] == "{}" || keywords[name] == "[]") {
+				continue
+			}
+			if pythonPayloadSupplied(keywords[name]) {
+				return true
+			}
+		}
+		return false
 	case "javascript", "jxa":
 		if !uploadPayloadIndicator(lower) {
 			return false
@@ -2857,12 +2922,13 @@ func languageUploadCall(language, line string) bool {
 	}
 }
 
-func pythonURLopenUploadPayload(line string) bool {
-	call := firstCallText(line, "urllib.request.urlopen(")
-	if call == "" {
+func pythonPayloadSupplied(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "None", "''", `""`, "b''", `b""`:
 		return false
+	default:
+		return true
 	}
-	return strings.Contains(condensed(call), ",data=")
 }
 
 func uploadPayloadIndicator(line string) bool {

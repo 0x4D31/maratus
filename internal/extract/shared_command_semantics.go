@@ -727,7 +727,11 @@ func plistModificationTarget(tool string, fields []string) (behavior.Resource, s
 		}
 		domain, key := fields[2], fields[3]
 		if strings.Contains(domain, "/") || strings.HasSuffix(strings.ToLower(domain), ".plist") {
-			return behavior.NewResource(behavior.ResourceFile, staticShellResource(domain), behavior.ResourceClassPropertyList), key, true
+			target := staticShellResource(domain)
+			if target != "" && !strings.HasSuffix(target, ".plist") {
+				target += ".plist"
+			}
+			return behavior.NewResource(behavior.ResourceFile, target, behavior.ResourceClassPropertyList), key, true
 		}
 		return behavior.NewResource(behavior.ResourceConfiguration, domain, behavior.ResourceClassPropertyList), key, true
 	case "plutil":
