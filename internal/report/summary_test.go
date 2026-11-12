@@ -541,3 +541,17 @@ func TestSummaryDeclaredEventsBelongToManifest(t *testing.T) {
 		t.Fatalf("wrong manifest context: %#v", context)
 	}
 }
+
+func TestEntryOperationsFollowOnlyExplicitConnectedOwnership(t *testing.T) {
+	entries := []SummaryActivation{{ID: "root-a"}, {ID: "root-b"}, {ID: "target-a"}}
+	ops := []behavior.ModeledOperation{{ID: "connected", Kind: behavior.OperationFileDelete, Execution: behavior.ExecutionContext{Connectivity: behavior.ConnectivityConnected, ExecutionRootIDs: []string{"root-a"}, InvokedTargetIDs: []string{"target-a"}}}, {ID: "unknown", Execution: behavior.ExecutionContext{Connectivity: behavior.ConnectivityUnknown}}}
+	projectEntryOperations(entries, ops)
+	for _, i := range []int{0, 2} {
+		if len(entries[i].ConnectedOperations) != 1 || entries[i].ConnectedOperations[0].ID != "connected" {
+			t.Fatalf("wrong entry operations: %#v", entries)
+		}
+	}
+	if entries[1].ConnectedOperationCount != 0 {
+		t.Fatal("unrelated entry received operation")
+	}
+}

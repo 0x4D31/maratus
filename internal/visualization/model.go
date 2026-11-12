@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	visualizationSchema = "maratus.visualization.v0.15"
+	visualizationSchema = "maratus.visualization.v0.16"
 	maxReferenceBytes   = 512
 	maxDetailRows       = 20
 	maxListItems        = 12
@@ -78,12 +78,14 @@ type visualProjection struct {
 }
 
 type visualProjectionActivation struct {
-	Context      []string `json:"context,omitempty"`
-	ID           string   `json:"id"`
-	Kind         string   `json:"kind"`
-	Name         string   `json:"name,omitempty"`
-	Interpreter  string   `json:"interpreter,omitempty"`
-	Connectivity string   `json:"connectivity,omitempty"`
+	Operations     []report.EntryOperation `json:"operations,omitempty"`
+	OperationCount int                     `json:"operation_count,omitempty"`
+	Context        []string                `json:"context,omitempty"`
+	ID             string                  `json:"id"`
+	Kind           string                  `json:"kind"`
+	Name           string                  `json:"name,omitempty"`
+	Interpreter    string                  `json:"interpreter,omitempty"`
+	Connectivity   string                  `json:"connectivity,omitempty"`
 }
 
 type visualProjectionBehavior struct {
@@ -189,8 +191,12 @@ func buildVisualProjection(rep report.Report) (visualProjection, map[string]stri
 		for _, fact := range item.Context[:min(len(item.Context), 8)] {
 			details = append(details, fact.Label+" "+terminal.EscapeTruncate(fact.Value, maxReferenceBytes))
 		}
+		ops := append([]report.EntryOperation(nil), item.ConnectedOperations...)
+		for i := range ops {
+			ops[i].Operand = terminal.EscapeTruncate(ops[i].Operand, maxReferenceBytes)
+		}
 		projection.ConditionalActivation = append(projection.ConditionalActivation, visualProjectionActivation{
-			Context: details, ID: terminal.EscapeTruncate(item.ID, maxReferenceBytes),
+			Operations: ops, OperationCount: item.ConnectedOperationCount, Context: details, ID: terminal.EscapeTruncate(item.ID, maxReferenceBytes),
 			Kind: terminal.EscapeTruncate(item.Kind, maxReferenceBytes), Name: terminal.EscapeTruncate(item.Name, maxReferenceBytes),
 			Interpreter: terminal.EscapeTruncate(item.Interpreter, maxReferenceBytes), Connectivity: terminal.EscapeTruncate(string(item.Execution.Connectivity), maxReferenceBytes),
 		})

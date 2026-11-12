@@ -5,13 +5,14 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/0x4D31/maratus/internal/behavior"
 )
 
-const SummarySchemaVersion = "maratus.summary.v0.1-preview.10"
+const SummarySchemaVersion = "maratus.summary.v0.1-preview.11"
 
 const maxSummaryCodeContext = 128
 
@@ -63,20 +64,28 @@ type SummaryOverview struct {
 	Notice              string         `json:"notice"`
 }
 
+type EntryOperation struct {
+	ID      string                 `json:"operation_id"`
+	Kind    behavior.OperationKind `json:"kind"`
+	Support behavior.Support       `json:"support"`
+	Operand string                 `json:"operand,omitempty"`
+}
 type SummaryActivation struct {
-	DeclarationNodeID string                    `json:"declaration_node_id,omitempty"`
-	StartScopeID      string                    `json:"start_scope_id,omitempty"`
-	EntryPath         string                    `json:"entry_path,omitempty"`
-	Context           []ActivationFact          `json:"context,omitempty"`
-	Kind              string                    `json:"kind"`
-	ID                string                    `json:"id"`
-	Name              string                    `json:"name,omitempty"`
-	Interpreter       string                    `json:"interpreter,omitempty"`
-	Arguments         []string                  `json:"arguments"`
-	NodeID            string                    `json:"node_id,omitempty"`
-	Source            *behavior.EntityRef       `json:"source,omitempty"`
-	Execution         behavior.ExecutionContext `json:"execution"`
-	EvidenceIDs       []string                  `json:"evidence_ids"`
+	ConnectedOperationCount int                       `json:"connected_operation_count,omitempty"`
+	ConnectedOperations     []EntryOperation          `json:"connected_operations,omitempty"`
+	DeclarationNodeID       string                    `json:"declaration_node_id,omitempty"`
+	StartScopeID            string                    `json:"start_scope_id,omitempty"`
+	EntryPath               string                    `json:"entry_path,omitempty"`
+	Context                 []ActivationFact          `json:"context,omitempty"`
+	Kind                    string                    `json:"kind"`
+	ID                      string                    `json:"id"`
+	Name                    string                    `json:"name,omitempty"`
+	Interpreter             string                    `json:"interpreter,omitempty"`
+	Arguments               []string                  `json:"arguments"`
+	NodeID                  string                    `json:"node_id,omitempty"`
+	Source                  *behavior.EntityRef       `json:"source,omitempty"`
+	Execution               behavior.ExecutionContext `json:"execution"`
+	EvidenceIDs             []string                  `json:"evidence_ids"`
 }
 
 type ActivationFact struct {
@@ -263,6 +272,7 @@ func ProjectSummary(rep Report) Summary {
 			Execution: target.Execution, EvidenceIDs: nonnilStrings(target.EvidenceIDs),
 		})
 	}
+	projectEntryOperations(summary.ConditionalActivation, rep.Operations)
 	summary.ModeledBehavior = projectBehavior(rep)
 	summary.Capabilities = projectCapabilities(rep)
 	operationsByID := operationsByID(rep.Operations)
@@ -847,6 +857,38 @@ func appendUniqueStrings(target []string, values ...string) []string {
 	return target
 }
 
+// Index explicit ownership once. The bounded examples refer to canonical operations.
+func projectEntryOperations(entries []SummaryActivation, operations []behavior.ModeledOperation) {
+	byID := make(map[string]*SummaryActivation, len(entries))
+	for i := range entries {
+		byID[entries[i].ID] = &entries[i]
+	}
+	retain := func(id string, op *behavior.ModeledOperation) {
+		entry := byID[id]
+		if entry == nil {
+			return
+		}
+		entry.ConnectedOperationCount++
+		if len(entry.ConnectedOperations) >= 8 {
+			return
+		}
+		operand := summaryBehaviorResource(SummaryBehavior{Kind: op.Kind, Resources: op.ResourceBindings})
+		entry.ConnectedOperations = append(entry.ConnectedOperations, EntryOperation{op.ID, op.Kind, op.Support, operand})
+	}
+	for i := range operations {
+		op := &operations[i]
+		if op.Execution.Connectivity != behavior.ConnectivityConnected {
+			continue
+		}
+		for _, id := range op.Execution.ExecutionRootIDs {
+			retain(id, op)
+		}
+		for _, id := range op.Execution.InvokedTargetIDs {
+			retain(id, op)
+		}
+	}
+}
+
 func nonnilStrings(values []string) []string {
 	if values == nil {
 		return []string{}
@@ -868,6 +910,29 @@ func WriteSummaryText(w io.Writer, rep Report, options TextOptions) error {
 		p.summaryActivation(summary)
 	}
 	p.conciseCapabilities()
+	if summary.Overview.Operations == 0 && summary.Overview.ExecutionRoots == 0 {
+		paths := make(map[string]string, len(rep.ArtifactNodes))
+		for _, node := range rep.ArtifactNodes {
+			paths[node.ID] = node.LogicalPath
+		}
+		shown := map[string]bool{}
+		for _, gap := range summary.CoverageGapsAndLimits {
+			if gap.NodeID == "" || (gap.Status != "partial" && gap.Status != "unsupported") || shown[gap.AnalysisArea] || gap.Detail == "" {
+				continue
+			}
+			if len(shown) == 0 {
+				p.section("ANALYSIS LIMITS AT SOURCE", "")
+			}
+			shown[gap.AnalysisArea] = true
+			p.printf("  %s  [%s]\n", boundedText(filepath.Base(paths[gap.NodeID]), 60), gap.NodeID)
+			for _, line := range conciseWrappedLines(boundedText(gap.Detail, 240), 90) {
+				p.printf("    %s\n", line)
+			}
+			if len(shown) == 2 {
+				break
+			}
+		}
+	}
 	p.conciseAttack()
 	p.summaryCodeContext(summary)
 	p.summaryAdditionalBehavior(summary)
@@ -926,7 +991,24 @@ func (p *presentation) summaryActivation(summary Summary) {
 		}
 		p.printf("  %-24s  %s  [%s]\n", boundedText(label, 24), boundedText(detail, 66), item.ID)
 		for _, fact := range item.Context[:min(len(item.Context), 6)] {
-			p.printf("    %s  %s  [%s]\n", fact.Label, boundedText(fact.Value, 64), fact.FeatureID)
+			label, value := fact.Label, fact.Value
+			if label == "Phase script" {
+				label = "Script excerpt"
+				for line := range strings.Lines(value) {
+					line = strings.TrimSpace(line)
+					if line != "" && !strings.HasPrefix(line, "#") {
+						value = line
+						break
+					}
+				}
+			}
+			p.printf("    %s  %s  [%s]\n", label, boundedText(value, 64), fact.FeatureID)
+		}
+		for _, op := range item.ConnectedOperations[:min(3, len(item.ConnectedOperations))] {
+			p.printf("    %s  %s  %s  [%s]\n", op.Kind, op.Support, boundedText(op.Operand, 54), op.ID)
+		}
+		if remaining := item.ConnectedOperationCount - min(3, len(item.ConnectedOperations)); remaining > 0 {
+			p.omitted(remaining, "connected operations")
 		}
 		if len(item.Context) > 6 {
 			p.omitted(len(item.Context)-6, "activation details")
