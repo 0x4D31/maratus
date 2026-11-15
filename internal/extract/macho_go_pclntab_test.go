@@ -25,7 +25,7 @@ func TestGoPCLNFunctionsFromDataRecoversExactNamesAndRuntimeClass(t *testing.T) 
 }
 
 func TestGoPCLNFunctionRangesEnrichesGenericBoundaries(t *testing.T) {
-	pcln := syntheticGo120PCLN(t, 0x1000)
+	pcln := syntheticGo120PCLN(t, 0)
 	image := make([]byte, 0x200+len(pcln))
 	copy(image[0x200:], pcln)
 	text := &macho.Section{SectionHeader: macho.SectionHeader{Seg: "__TEXT", Name: "__text", Addr: 0x1000, Size: 0x100, Offset: 0x100}}
@@ -41,6 +41,17 @@ func TestGoPCLNFunctionRangesEnrichesGenericBoundaries(t *testing.T) {
 	}
 	if functions[1].End != 0x1040 {
 		t.Fatalf("exact pclntab end was expanded into padding: %#v", functions[1])
+	}
+}
+
+func TestGoPCLNFunctionsUsesSectionBaseForUnrelocatedTable(t *testing.T) {
+	data := syntheticGo120PCLN(t, 0)
+	functions, _, _, detail, ok := goPCLNFunctionsFromData(data, 0x1000, 0x1100)
+	if !ok || len(functions) != 2 || functions[0].Start != 0x1000 || functions[1].End != 0x1040 {
+		t.Fatalf("unrelocated table = %#v, ok %v detail %q", functions, ok, detail)
+	}
+	if _, _, _, detail, ok := goPCLNFunctionsFromData(data, 0x1000, 0x1030); ok || !strings.Contains(detail, "out-of-range") {
+		t.Fatalf("unrelocated out-of-range table = ok %v detail %q", ok, detail)
 	}
 }
 

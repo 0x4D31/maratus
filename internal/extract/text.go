@@ -4623,18 +4623,6 @@ func callTextAfterMarker(line, lower, marker string) string {
 	return callTextAtOpen(line, idx+len(marker)-1)
 }
 
-func firstCallText(line, marker string) string {
-	idx := strings.Index(line, marker)
-	if idx < 0 {
-		return ""
-	}
-	open := idx + len(marker) - 1
-	if open < 0 || open >= len(line) || line[open] != '(' {
-		return ""
-	}
-	return callTextAtOpen(line, open)
-}
-
 func callTextAtOpen(line string, open int) string {
 	if open < 0 || open >= len(line) || line[open] != '(' {
 		return ""
@@ -4886,17 +4874,6 @@ func appendCallArgument(out *[]string, value string) {
 	if value != "" {
 		*out = append(*out, value)
 	}
-}
-
-func condensed(value string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case ' ', '\t', '\n', '\r':
-			return -1
-		default:
-			return r
-		}
-	}, value)
 }
 
 func firstQuotedBudget(line string, budget *textLineBudget) string {
