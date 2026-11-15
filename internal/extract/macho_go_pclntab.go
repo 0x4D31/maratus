@@ -102,6 +102,11 @@ func goPCLNFunctionsFromData(data []byte, textStart, textEnd uint64, expectedOrd
 	if count == 0 || count > maxGoPCLNFunctions {
 		return nil, 0, 0, fmt.Sprintf("Go pclntab function count %d is outside the 1..%d bound", count, maxGoPCLNFunctions), false
 	}
+	// Mach-O PIE tables may leave this pointer zero until relocation.
+	// Like debug/gosym, use the executable section's validated start PC.
+	if metadataText == 0 {
+		metadataText = textStart
+	}
 	if metadataText < textStart || metadataText >= textEnd {
 		return nil, 0, 0, "Go pclntab text base is outside the analyzed executable section", false
 	}
