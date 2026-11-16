@@ -64,6 +64,27 @@ func TestMachOChainedImportsRejectOverlongName(t *testing.T) {
 	}
 }
 
+func TestMachOChainedImportsBoundRepeatedNameBytes(t *testing.T) {
+	for _, extra := range []int{0, 1} {
+		count := maxMachOChainedImportNameBytes/maxMachOChainedImportNameLen + extra
+		names := make([]string, count)
+		names[0] = strings.Repeat("a", maxMachOChainedImportNameLen)
+		file, image, _ := chainedImportFixture(t, 1, names)
+		// A small table can reference the same long name in every record.
+		for index := 0; index < count; index++ {
+			binary.LittleEndian.PutUint32(image[64+28+index*4:], 1)
+		}
+		imports, present, detail := machoChainedImports(file, image, 0)
+		if extra == 0 {
+			if !present || detail != "" || len(imports) != count || imports[count-1].name != names[0] {
+				t.Fatalf("at name budget: imports=%d present=%v detail=%q", len(imports), present, detail)
+			}
+		} else if !present || len(imports) != 0 || !strings.Contains(detail, "cumulative budget") {
+			t.Fatalf("over name budget: imports=%d present=%v detail=%q", len(imports), present, detail)
+		}
+	}
+}
+
 func TestMachOChainedImportsAbsentWithoutLoadCommand(t *testing.T) {
 	imports, present, detail := machoChainedImports(&macho.File{ByteOrder: binary.LittleEndian}, nil, 0)
 	if present || detail != "" || len(imports) != 0 {

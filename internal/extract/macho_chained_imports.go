@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	lcDyldChainedFixups          = 0x80000034
-	maxMachOChainedFixupBytes    = 16 << 20
-	maxMachOChainedImports       = 200000
-	maxMachOChainedImportNameLen = 4096
+	lcDyldChainedFixups            = 0x80000034
+	maxMachOChainedFixupBytes      = 16 << 20
+	maxMachOChainedImports         = 200000
+	maxMachOChainedImportNameLen   = 4096
+	maxMachOChainedImportNameBytes = 8 << 20
 )
 
 type machoChainedImport struct {
@@ -84,6 +85,7 @@ func machoChainedImports(file *macho.File, image []byte, byteOffsetBase int64) (
 	}
 	symbols := payload[symbolsOffset:]
 	imports = make([]machoChainedImport, 0, count)
+	nameBytes := 0
 	for index := uint64(0); index < count; index++ {
 		entry := payload[importsOffset+index*entrySize : importsOffset+(index+1)*entrySize]
 		nameOffset := uint64(0)
@@ -115,6 +117,11 @@ func machoChainedImports(file *macho.File, image []byte, byteOffsetBase int64) (
 		if terminator <= 0 {
 			return nil, true, fmt.Sprintf("LC_DYLD_CHAINED_FIXUPS import %d has an empty, unterminated, or overlong symbol name", index)
 		}
+		// Repeated offsets still allocate a name for each import record.
+		if terminator > maxMachOChainedImportNameBytes-nameBytes {
+			return nil, true, fmt.Sprintf("LC_DYLD_CHAINED_FIXUPS import names exceed the %d-byte cumulative budget", maxMachOChainedImportNameBytes)
+		}
+		nameBytes += terminator
 		name := string(available[:terminator])
 		if !validMachOChainedImportName(name) {
 			return nil, true, fmt.Sprintf("LC_DYLD_CHAINED_FIXUPS import %d has an invalid symbol name", index)

@@ -284,3 +284,35 @@ func hasArtifactPropertyKind(items []behavior.ArtifactProperty, kind string) boo
 	}
 	return false
 }
+
+func TestMalformedIndexedCodeDirectoryReportsPartialCoverage(t *testing.T) {
+	for _, short := range []bool{false, true} {
+		signature := testHashedCodeSignature([]byte("control"), 2, 32, 0, 0)
+		if short {
+			binary.BigEndian.PutUint32(signature[24:28], 8)
+		} else {
+			binary.BigEndian.PutUint32(signature[20:24], 0x12345678)
+		}
+		var graph behavior.Graph
+		absent := parseCodeSignatureBlobs(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "sample"}, signature, []byte("control"), "arm64", "")
+		if absent || len(graph.Coverage) != 1 || graph.Coverage[0].Status != "partial" || graph.Coverage[0].AnalysisArea != "macho-code-signature/arm64" {
+			t.Fatalf("malformed signature lost coverage: absent=%v coverage=%#v", absent, graph.Coverage)
+		}
+		if hasArtifactProperty(graph.ArtifactProperties, "code-directory-page-integrity", "valid", behavior.SupportDirect) {
+			t.Fatal("malformed CodeDirectory acquired valid integrity")
+		}
+	}
+}
+
+func TestUnrecognizedCodeSignatureReportsPartialCoverage(t *testing.T) {
+	shortDirectory := make([]byte, 8)
+	binary.BigEndian.PutUint32(shortDirectory[:4], csMagicCodeDirectory)
+	binary.BigEndian.PutUint32(shortDirectory[4:], 8)
+	for _, data := range [][]byte{[]byte("invalid"), make([]byte, 8), shortDirectory} {
+		var graph behavior.Graph
+		absent := parseCodeSignatureBlobs(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "sample"}, data, nil, "arm64", "")
+		if absent || !hasPartialCoverageScope(graph.Coverage, "macho-code-signature/arm64") {
+			t.Fatalf("invalid signature lost coverage: absent=%v coverage=%#v", absent, graph.Coverage)
+		}
+	}
+}
