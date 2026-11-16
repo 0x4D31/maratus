@@ -502,6 +502,9 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		}
 		vars := variableState.variables(scopeKey)
 		requestVars := variableState.requestVariables(scopeKey)
+		if language == "python" {
+			invalidatePythonResponseUses(semanticLine, variableState, scopeKey)
+		}
 		assigned := false
 		assignedName := ""
 		assignmentRetained := true
@@ -561,6 +564,12 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 		case "python":
 			var observed bool
 			pythonNetworkBindingName, networkSemanticLine, observed, networkCall = pythonNetworkCallBinding(semanticLine, lineNo, &pythonAPIBindings)
+			if networkCall {
+				value := resolveNetworkExpression(language, pythonNetworkArgument(networkSemanticLine, "url", lineBudget), vars)
+				if endpoint, err := url.Parse(value); err == nil && (strings.EqualFold(endpoint.Scheme, "file") || strings.EqualFold(endpoint.Scheme, "data")) {
+					networkCall = false
+				}
+			}
 			networkCallObserved = networkCallObserved || observed
 		case "javascript":
 			if javascriptFetchSafe {
@@ -597,7 +606,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
 			break
 		}
-		if name, destinations, ok := languageNetworkAssignmentWithDestinations(language, semanticLine, networkDestinations); ok {
+		if name, destinations, ok := languageNetworkAssignmentWithDestinations(language, networkSemanticLine, networkDestinations); ok {
 			variableState.setRequestVariable(scopeKey, name, destinations)
 			requestVars = variableState.requestVariables(scopeKey)
 		}
@@ -605,7 +614,18 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
 			break
 		}
-		requestWriteTarget, requestWriteDestinations, requestWriteOK := languageRequestWriteTargetBudget(language, analysisLine, requestVars, lineBudget)
+		requestWriteLine := analysisLine
+		if language == "python" {
+			requestWriteLine = semanticLine
+		}
+		requestWriteTarget, requestWriteDestinations, requestWriteOK := languageRequestWriteTargetBudget(language, requestWriteLine, requestVars, vars, lineBudget)
+		if language == "python" {
+			requestWriteOK = requestWriteOK && pythonAPIBindings.builtinOpenSafe
+			inlineWriteOK := networkCall && pythonAPIBindings.builtinOpenSafe && languageDownloadTargetBudget(language, networkSemanticLine, vars, lineBudget) != ""
+			if !requestWriteOK && !inlineWriteOK && strings.Contains(pythonCodeContext(analysisLine), ".write(") && (networkCallObserved || textRequestVariableCount(requestVars) > 0 || strings.Contains(analysisLine, ".content")) {
+				addPartialCoverageOnce(graph, content.NodeID, "python-response-write", "response downloads require an exact unshadowed binary open/write chain and unchanged response content")
+			}
+		}
 		if variableState.limited {
 			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
 			break
@@ -657,7 +677,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 				&shellSourceOrder{group: graph.NewSourceOrderGroup(), uncertain: shellConditionalAssignment}, variableState, scopeKey)
 		case "python", "javascript":
 			if networkCall {
-				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget)
+				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget, pythonAPIBindings.builtinOpenSafe, vars)
 			}
 			if requestWriteOK {
 				extractResolvedLanguageRequestWrite(graph, lineContent, language, requestWriteTarget, requestWriteDestinations, lineNo, evidenceID)
@@ -793,7 +813,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			}
 		default:
 			if networkCall {
-				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget)
+				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget, pythonAPIBindings.builtinOpenSafe, vars)
 			}
 		}
 	}
@@ -2094,10 +2114,13 @@ func addStaticAssignedURLs(graph *behavior.Graph, content artifact.Content, lang
 	}
 }
 
-func extractResolvedLanguageNetworkBudget(graph *behavior.Graph, content artifact.Content, language, line, expandedLine string, destinations []string, lineNo int, evidenceID string, budget *textLineBudget) {
+func extractResolvedLanguageNetworkBudget(graph *behavior.Graph, content artifact.Content, language, line, expandedLine string, destinations []string, lineNo int, evidenceID string, budget *textLineBudget, pythonOpenSafe bool, vars any) {
 	kind := languageNetworkOperationKind(language, line)
 	bindings := networkOperationBindings(kind, destinations, "", "")
-	if target := languageDownloadTargetBudget(language, expandedLine, budget); target != "" {
+	if language == "python" {
+		expandedLine = line
+	}
+	if target := languageDownloadTargetBudget(language, expandedLine, vars, budget); target != "" && (language != "python" || pythonOpenSafe || strings.Contains(pythonCodeContext(line), "urllib.request.urlretrieve(")) {
 		kind = behavior.OperationNetworkDownload
 		bindings = networkOperationBindings(kind, destinations, target, "")
 	}
@@ -2118,11 +2141,11 @@ func extractResolvedLanguageNetworkBudget(graph *behavior.Graph, content artifac
 }
 
 func languageNetworkAssignmentWithDestinations(language, line string, destinations []string) (string, []string, bool) {
-	name, _, ok := requestAssignmentParts(language, line)
+	name, expression, ok := requestAssignmentParts(language, line)
 	if !ok {
 		return "", nil, false
 	}
-	if len(destinations) == 0 {
+	if len(destinations) == 0 || language == "python" && !pythonResponseCall(expression) {
 		return "", nil, false
 	}
 	return name, destinations, true
@@ -2165,26 +2188,21 @@ func extractResolvedLanguageRequestWrite(graph *behavior.Graph, content artifact
 	graph.AddNetworkImplementation(observation)
 }
 
-func languageRequestWriteTargetBudget(language, line string, requestVars any, budget *textLineBudget) (string, []string, bool) {
+func languageRequestWriteTargetBudget(language, line string, requestVars, vars any, budget *textLineBudget) (string, []string, bool) {
 	if textRequestVariableCount(requestVars) == 0 {
 		return "", nil, false
 	}
 	lower := strings.ToLower(line)
 	switch language {
 	case "python":
-		if !strings.Contains(lower, ".write(") || !strings.Contains(lower, ".content") {
+		target, body, ok := pythonResponseWrite(line, vars)
+		if !ok || !strings.HasSuffix(body, ".content") {
 			return "", nil, false
 		}
-		target := firstPythonOpenPathBudget(line, budget)
-		if target == "" {
-			return "", nil, false
-		}
-		name := firstRequestVariableWithSuffix(line, requestVars, func(suffix string) bool {
-			return strings.HasPrefix(suffix, ".content")
-		})
-		if name != "" {
-			destinations, _ := lookupTextRequestVariable(requestVars, name)
-			return target, destinations, true
+		name := strings.TrimSuffix(body, ".content")
+		if identifierName(name) {
+			destinations, found := lookupTextRequestVariable(requestVars, name)
+			return target, destinations, found
 		}
 	case "javascript", "jxa":
 		if !javascriptFileWrite(lower) || !javascriptResponseBodyMarker(lower) {
@@ -2236,19 +2254,6 @@ func requestVariableBudget(values any) *textVariableState {
 		}
 	}
 	return nil
-}
-
-func firstPythonOpenPathBudget(line string, budget *textLineBudget) string {
-	lower := strings.ToLower(line)
-	call := callTextAfterMarker(line, lower, "open(")
-	if call == "" {
-		return ""
-	}
-	args := boundedTextCallArguments(call, "file-write arguments", budget)
-	if len(args) == 0 {
-		return ""
-	}
-	return firstDownloadPathBudget(args[0], budget)
 }
 
 func firstJavaScriptWritePathBudget(line, lower string, budget *textLineBudget) string {
@@ -2325,22 +2330,10 @@ func containsJavaScriptPropertyMarker(line, marker string) bool {
 func languageNetworkDestinationsBudget(language, line string, vars any, budget *textLineBudget) []string {
 	lower := strings.ToLower(line)
 	if language == "python" {
-		marker, open, ok := pythonNetworkCallLocation(line)
-		if !ok {
-			return nil
-		}
-		call := callTextAtOpen(line, open)
-		if call == "" {
-			return nil
-		}
-		args := boundedTextCallArguments(call, "network-call arguments", budget)
-		for _, index := range networkDestinationArgumentIndexes(marker, args) {
-			if index >= len(args) {
-				continue
-			}
-			if dest := destinationsBudget(resolveNetworkExpression(language, args[index], vars), budget); len(dest) > 0 {
-				return dest
-			}
+		value := resolveNetworkExpression(language, pythonNetworkArgument(line, "url", budget), vars)
+		parsed, err := url.Parse(value)
+		if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != "" {
+			return []string{value}
 		}
 		return nil
 	}
@@ -3012,13 +3005,21 @@ func chmodModeInLineMakesExecutableBudget(line string, budget *textLineBudget) b
 	return false
 }
 
-func languageDownloadTargetBudget(language, line string, budget *textLineBudget) string {
+func languageDownloadTargetBudget(language, line string, vars any, budget *textLineBudget) string {
 	lower := strings.ToLower(line)
 	switch language {
 	case "python":
-		if !pythonDownloadCall(lower) || !pythonFileWrite(lower) {
+		if marker, _, ok := pythonNetworkCallLocation(line); ok && marker == "urllib.request.urlretrieve(" {
+			value := resolveStringExpression("python", pythonNetworkArgument(line, "filename", budget), vars)
+			if value != "" && !strings.ContainsRune(value, 0) {
+				return value
+			}
 			return ""
 		}
+		if target, body, ok := pythonResponseWrite(line, vars); ok && strings.HasSuffix(body, ".content") && pythonResponseCall(strings.TrimSuffix(body, ".content")) {
+			return target
+		}
+		return ""
 	case "javascript", "jxa":
 		if !javascriptDownloadCall(lower) || !javascriptFileWrite(lower) {
 			return ""
@@ -3027,22 +3028,6 @@ func languageDownloadTargetBudget(language, line string, budget *textLineBudget)
 		return ""
 	}
 	return firstDownloadPathBudget(line, budget)
-}
-
-func pythonDownloadCall(line string) bool {
-	line = pythonCodeContext(line)
-	return strings.Contains(line, "requests.get(") ||
-		strings.Contains(line, "httpx.get(") ||
-		strings.Contains(line, "urllib.request.urlopen(") ||
-		strings.Contains(line, "urllib.request.urlretrieve(") ||
-		strings.Contains(line, "urllib2.urlopen(")
-}
-
-func pythonFileWrite(line string) bool {
-	line = pythonCodeContext(line)
-	return strings.Contains(line, "open(") && strings.Contains(line, ".write(") ||
-		strings.Contains(line, "write_bytes(") ||
-		strings.Contains(line, "urllib.request.urlretrieve(")
 }
 
 func javascriptDownloadCall(line string) bool {

@@ -1997,6 +1997,9 @@ func extractCodeSignature(graph *behavior.Graph, content artifact.Content, file 
 
 func parseCodeSignatureBlobs(graph *behavior.Graph, content artifact.Content, data, image []byte, arch, parentEvidence string) bool {
 	inspection := inspectCodeSignatureBlobs(data, maxMachOCodeSignatureSlots, maxMachOCodeSignatureBlobs)
+	if inspection.invalid || !inspection.recognized {
+		addPartialCoverageOnce(graph, content.NodeID, "macho-code-signature/"+arch, "code-signature structure is unrecognized or contains an invalid blob")
+	}
 	if inspection.truncated {
 		addPartialCoverageOnce(graph, content.NodeID, "macho-code-signature/"+arch, fmt.Sprintf("code-signature parsing capped at %d index slots and %d unique blobs, or encountered a truncated index", maxMachOCodeSignatureSlots, maxMachOCodeSignatureBlobs))
 	}
@@ -2051,8 +2054,9 @@ func inspectCodeSignatureBlobs(data []byte, slotLimit, blobLimit int) codeSignat
 	if magic != csMagicSuperBlob {
 		inspection.blobs = singleCodeSignatureBlob(data)
 		inspection.recognized = len(inspection.blobs) > 0
-		if magic == csMagicCodeDirectory && len(data) >= 44 {
-			inspection.validCodeDirectory = true
+		if magic == csMagicCodeDirectory {
+			inspection.validCodeDirectory = len(data) >= 44
+			inspection.invalid = !inspection.validCodeDirectory
 		}
 		if magic == csMagicEntitlementsXML {
 			inspection.hasEntitlementSlots = true
