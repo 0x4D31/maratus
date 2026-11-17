@@ -106,7 +106,9 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
    exact manifest/declaration, selected target, and unresolved host conditions.
    Do not infer that opening a project, installing a package, or building it
    actually happened. Consult the version-matched technique coverage ledger for
-   supported formats and call forms.
+   supported formats and call forms. Use the [developer-artifact checklist](references/developer-artifacts.md)
+   when host context, distributed versus installed bytes, or a later payload
+   affects the question.
 4. Separate observations (strings, imports, dependencies, signing metadata),
    modeled operations, and operation-backed capability matches. A URL does not
    prove communication; an import does not prove a call. Never fill an unresolved
@@ -123,6 +125,7 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
    trust, notarization, Gatekeeper approval, or benignness. Sampled entropy and
    packer-like section names are leads, not proof of packing or malicious intent.
    Check protected-slice coverage before interpreting missing calls or strings.
+   Sparse symbols and absent imports do not establish absence of behavior.
    No matches does not establish that an artifact is safe.
 
 If the question requires broader retained content, make a separate recorded scan

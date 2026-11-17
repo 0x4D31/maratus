@@ -19,7 +19,8 @@ result comes from a fresh inspection or a saved report.]
 - Input: [Original name, detected format, size, and SHA-256 when available.]
 - Hash scope: [Which exact file or retained member was hashed? A bundle or
   directory has no single file hash. Distinguish an archive hash from a member
-  hash and a saved report hash.]
+  hash and a saved report hash. Identify distribution, installed copy, source
+  revision, or compiled binary; do not assume they contain identical code.]
 - Analysis: [Maratus version/commit and modified-build status, report schema,
   platform, relevant options, and nondefault limits. Record missing provenance.]
 - Evidence record: [Private canonical report path and SHA-256, manifest path,
@@ -38,6 +39,12 @@ IDs. Explain the supported host event, declaration, root ID, selected target,
 and unresolved selection conditions. Separate contained code from activated
 code. For developer artifacts, this may be an install hook, build script,
 project phase, extension activation, or agent hook.]
+
+[State the relevant host/version, environment, working directory, profile or
+build target where known. Distinguish the containing artifact, first selected
+entry, and later helpers/payloads. Mark missing objects and unsupported links.
+For endpoint follow-up, identify the actual execution host; a local UI can
+control remote code. Do not invent host state from static declarations.]
 
 For Mach-O, identify the relevant slice and record material signing/integrity,
 entry/initializer, library, or wrapper context. Signing and library declarations
