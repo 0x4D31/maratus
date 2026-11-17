@@ -237,6 +237,36 @@ func TestMachOPreflightRejectsThinAllocationCounts(t *testing.T) {
 	}
 }
 
+func TestMachOPreflightValidatesEncryptionCommands(t *testing.T) {
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		for _, test := range []struct {
+			name           string
+			cmd            uint32
+			size           int
+			offset, length uint32
+			want           string
+		}{
+			{"32 exact", lcEncryptionInfo, 20, 0, 52, ""},
+			{"32 truncated", lcEncryptionInfo, 16, 0, 0, "truncated"},
+			{"64 exact", lcEncryptionInfo64, 24, 0, 56, ""},
+			{"64 missing padding", lcEncryptionInfo64, 20, 0, 0, "truncated"},
+			{"range beyond file", lcEncryptionInfo64, 24, 1, 56, "outside file data"},
+			{"range overflow", lcEncryptionInfo64, 24, ^uint32(0), 2, "outside file data"},
+		} {
+			t.Run(order.String()+"/"+test.name, func(t *testing.T) {
+				data := make([]byte, 32+test.size)
+				for index, value := range []uint32{macho.Magic64, uint32(macho.CpuArm64), 0, uint32(macho.TypeExec), 1, uint32(test.size), 0, 0, test.cmd, uint32(test.size), test.offset, test.length} {
+					order.PutUint32(data[index*4:index*4+4], value)
+				}
+				_, err := PreflightMachO(data)
+				if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+					t.Fatalf("PreflightMachO() error = %v; want %q", err, test.want)
+				}
+			})
+		}
+	}
+}
+
 func TestMachOPreflightAllowsMinimalThinFile(t *testing.T) {
 	data := testThinMachO()
 	isFat, err := PreflightMachO(data)

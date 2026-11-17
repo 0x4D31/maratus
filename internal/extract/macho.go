@@ -35,6 +35,7 @@ const (
 	lcBuildVersion       = 0x32
 	lcMain               = 0x80000028
 	lcDataInCode         = 0x29
+	sgProtectedVersion1  = 0x8
 
 	lcLoadDylib       = uint32(macho.LoadCmdDylib)
 	lcLoadWeakDylib   = 0x80000018
@@ -352,8 +353,8 @@ func extractMachOFile(graph *behavior.Graph, content artifact.Content, file *mac
 	}
 	entitlementSlotsAbsent := extractCodeSignature(graph, content, file, arch, image)
 	if encrypted {
-		// cryptid is a loader assertion that bytes in the declared encrypted
-		// range are ciphertext. Conservatively avoid behavioral byte decoding for
+		// Encryption commands and protected-segment flags declare protected
+		// bytes. Conservatively avoid behavioral byte decoding for
 		// this slice so ciphertext cannot become strings, calls, xrefs, operations,
 		// or reachability. Structural headers, imports, section metadata (including
 		// bounded entropy), rpaths, and the embedded signature remain safe to report.
@@ -1904,7 +1905,22 @@ func findLinkeditDataCommand(file *macho.File, command uint32) (linkeditCommand,
 }
 
 func extractEncryptionInfo(graph *behavior.Graph, content artifact.Content, file *macho.File, arch string) bool {
+	encrypted := false
+	clearEvidence := ""
 	for _, load := range file.Loads {
+		if graph.WorkLimitReached() {
+			graph.MarkWorkOmitted()
+			return true // An incomplete protection check cannot authorize byte analysis.
+		}
+		if segment, ok := load.(*macho.Segment); ok && segment.Flag&sgProtectedVersion1 != 0 {
+			ev := graph.AddEvidence(behavior.Evidence{
+				NodeID: content.NodeID, Logical: content.LogicalPath,
+				Method: "macho-load-command", Kind: "segment-protection", Arch: arch,
+				Value: fmt.Sprintf("segment=%s fileoff=%d filesize=%d flags=0x%x (SG_PROTECTED_VERSION_1)", segment.Name, segment.Offset, segment.Filesz, segment.Flag),
+			})
+			graph.AddArtifactProperty(behavior.ArtifactProperty{NodeID: content.NodeID, Kind: "macho-encryption", Value: "encrypted", EvidenceIDs: []string{ev}, Support: behavior.SupportDirect})
+			encrypted = true
+		}
 		rawer, ok := load.(interface{ Raw() []byte })
 		if !ok {
 			continue
@@ -1920,10 +1936,6 @@ func extractEncryptionInfo(graph *behavior.Graph, content artifact.Content, file
 		cryptOff := file.ByteOrder.Uint32(raw[8:12])
 		cryptSize := file.ByteOrder.Uint32(raw[12:16])
 		cryptID := file.ByteOrder.Uint32(raw[16:20])
-		state := "not-encrypted"
-		if cryptID != 0 {
-			state = "encrypted"
-		}
 		ev := graph.AddEvidence(behavior.Evidence{
 			NodeID:  content.NodeID,
 			Logical: content.LogicalPath,
@@ -1932,18 +1944,24 @@ func extractEncryptionInfo(graph *behavior.Graph, content artifact.Content, file
 			Value:   fmt.Sprintf("cryptoff=%d cryptsize=%d cryptid=%d", cryptOff, cryptSize, cryptID),
 			Arch:    arch,
 		})
-		graph.AddArtifactProperty(behavior.ArtifactProperty{NodeID: content.NodeID, Kind: "macho-encryption", Value: state, EvidenceIDs: []string{ev}, Support: behavior.SupportDirect})
 		if cryptID != 0 {
-			graph.AddCoverage(behavior.Coverage{
-				NodeID:       content.NodeID,
-				AnalysisArea: "macho-byte-analysis/" + arch,
-				Status:       "partial",
-				Detail:       "cryptid is nonzero; skipped byte-derived string, Objective-C, entitlement-fallback, function, call, xref, and reachability analysis for this architecture; retained structural metadata, imports, sections with bounded entropy, rpaths, and embedded-signature metadata",
-			})
+			graph.AddArtifactProperty(behavior.ArtifactProperty{NodeID: content.NodeID, Kind: "macho-encryption", Value: "encrypted", EvidenceIDs: []string{ev}, Support: behavior.SupportDirect})
+			encrypted = true
+		} else if clearEvidence == "" {
+			clearEvidence = ev
 		}
-		return cryptID != 0
 	}
-	return false
+	if encrypted {
+		graph.AddCoverage(behavior.Coverage{
+			NodeID:       content.NodeID,
+			AnalysisArea: "macho-byte-analysis/" + arch,
+			Status:       "partial",
+			Detail:       "nonzero cryptid or SG_PROTECTED_VERSION_1 declares protected bytes; skipped byte-derived string, Objective-C, entitlement-fallback, function, call, xref, and reachability analysis for this architecture; retained structural metadata, imports, sections with bounded entropy, rpaths, and embedded-signature metadata",
+		})
+	} else if clearEvidence != "" {
+		graph.AddArtifactProperty(behavior.ArtifactProperty{NodeID: content.NodeID, Kind: "macho-encryption", Value: "not-encrypted", EvidenceIDs: []string{clearEvidence}, Support: behavior.SupportDirect})
+	}
+	return encrypted
 }
 
 type codeSignatureBlob struct {

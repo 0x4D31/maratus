@@ -70,13 +70,15 @@ agent's conclusions. See [security guidance](../SECURITY.md) and the
 
 ## Background reading
 
-Patrick Wardle's *The Art of Mac Malware*, Volume 1, provides useful background:
+Patrick Wardle's *The Art of Mac Malware* provides useful background:
 
+- [Parsing Binaries](https://taomm.org/vol2/pdfs/CH%202%20Parsing%20Binaries.pdf) (Volume 2): inspect each Mach-O slice, validate structures, and distinguish loader metadata from behavior.
 - [Nonbinary Analysis](https://taomm.org/vol1/pdfs/CH%204%20Nonbinary%20Analysis.pdf): inspect packaging, declarations, scripts, and contained payloads.
 - [Binary Triage](https://taomm.org/vol1/pdfs/CH%205%20Binary%20Triage.pdf): use file identity, signing, libraries, and strings to guide investigation.
 - [Disassembly and Decompilation](https://taomm.org/vol1/pdfs/CH%206%20Disassembling%20%26%20Decompilation.pdf): investigate call arguments and control flow when triage leaves questions open.
 
-These chapters inform the workflow, not Maratus's coverage contract. Some book
+The final three chapters are from Volume 1. These chapters inform the workflow;
+Maratus's implementation and tests define its coverage contract. Some book
 examples execute samples or use online services; neither is part of this skill.
 Use the technique ledger for supported analysis and retain per-slice findings,
 explicit uncertainty, and the distinction between signing structure and trust.

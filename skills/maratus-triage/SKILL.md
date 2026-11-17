@@ -98,8 +98,8 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
    analysis, not complete recovery of all possible behavior.
 2. Inventory containers and selected artifacts by their detected format, not
    their extension. Include installer scripts, bundle declarations, and retained
-   embedded payloads. Containment alone is not activation. Distinguish a declared execution root from an invoked target and
-   from unreferenced code.
+   embedded payloads. Containment alone is not activation. Distinguish a declared
+   execution root from an invoked target and from unreferenced code.
 3. For developer artifacts, ask which supported host event selects the entry:
    package installation, Python site startup, a Cargo build script, an editor
    extension activation, a project build phase, or an agent hook. Preserve the
@@ -120,8 +120,10 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
    initializers, linked libraries, and recovered call arguments where available.
    A library declaration does not establish which file the loader will resolve.
    Embedded signing structure and page integrity do not establish certificate
-   trust, notarization, Gatekeeper approval, or benignness. No matches does not
-   establish that an artifact is safe.
+   trust, notarization, Gatekeeper approval, or benignness. Sampled entropy and
+   packer-like section names are leads, not proof of packing or malicious intent.
+   Check protected-slice coverage before interpreting missing calls or strings.
+   No matches does not establish that an artifact is safe.
 
 If the question requires broader retained content, make a separate recorded scan
 with `--include-unreferenced`; it expands analysis without creating execution

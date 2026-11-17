@@ -22,8 +22,8 @@ result comes from a fresh inspection or a saved report.]
   hash and a saved report hash.]
 - Analysis: [Maratus version/commit and modified-build status, report schema,
   platform, relevant options, and nondefault limits. Record missing provenance.]
-- Evidence record: [Private canonical report and manifest paths; original input
-  location or custody reference. Do not put credentials or archive passwords here.]
+- Evidence record: [Private canonical report path and SHA-256, manifest path,
+  and original input location or custody reference. Omit credentials and passwords.]
 - Result: [Exit status, stderr or diagnostic notes, and material partial/skipped
   coverage. A successful exit is not a safety assessment.]
 

@@ -425,6 +425,19 @@ Mach-O analysis follows the same layers as other formats:
 6. Direct-call, execution-root, and relation linking preserves the exact slice,
    function, scope, and evidence used for the conclusion.
 
+A nonzero `cryptid` in an encryption command or `SG_PROTECTED_VERSION_1` in
+any segment suppresses byte-derived string, function, call, and related
+behavior analysis for that slice. All protection declarations are checked;
+a clear marker cannot override a protected one. Structural metadata, imports,
+bounded section entropy, rpaths, and embedded-signature inspection remain
+available, with explicit partial coverage. Maratus does not decrypt the bytes
+or assume that another slice has the same protection or behavior.
+
+Section entropy samples at most 64 KiB per section and 8 MiB per architecture.
+It describes the sampled bytes, not necessarily the complete section. High
+entropy, sparse symbols, and packer-like section names are investigation leads;
+none establishes packing, encryption, or malicious intent on its own.
+
 This is not a decompiler or a general control-flow engine. Unsupported
 architectures, general register/vtable/function-pointer indirect calls, dynamic
 dispatch, data-dependent values, and budget exhaustion remain visible in
@@ -575,7 +588,11 @@ parsers.
 Finalization sorts set-like collections, assigns stable IDs, projects only
 referenced evidence, and validates every reference. Saved JSON includes the
 tool identity, settings, schema, ruleset, normalized rule-catalog digest, and
-coverage that affected the result.
+coverage that affected the result. Canonical JSON is the complete public report,
+not a full disassembly or call-graph export. Internal `macho.function_call`
+features are retained only when their key is needed by the rule catalog or
+their evidence supports a public calls relation. Evidence referenced by other
+public records remains available even when an internal feature is omitted.
 
 `maratus render` treats a saved report as untrusted input. It checks schema,
 limits, identifiers, node and scope ownership, evidence lineage, relation
