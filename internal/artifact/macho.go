@@ -611,7 +611,11 @@ func preflightThinMachO(data []byte, budget *machoPreflightBudget) error {
 				}
 			}
 		case macho.LoadCmd(lcEncryptionInfo), macho.LoadCmd(lcEncryptionInfo64):
-			if len(command) < encryptionCommandSize {
+			minimumSize := encryptionCommandSize
+			if cmd == macho.LoadCmd(lcEncryptionInfo64) {
+				minimumSize += 4 // encryption_info_command_64 includes a padding word.
+			}
+			if len(command) < minimumSize {
 				return fmt.Errorf("encryption-info command is truncated")
 			}
 			offset := uint64(order.Uint32(command[8:12]))

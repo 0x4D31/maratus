@@ -1,85 +1,19 @@
 # Technique coverage ledger
 
 This ledger is the implementation contract for security-relevant semantics.
-`supported` means at least one bounded adapter can emit the named typed
-operation with exact evidence. It does not mean every syntax, library, dynamic
-dispatch form, or artifact is supported. `observational` means retained
-Features may help an analyst but are deliberately too weak for an operation.
+`supported` means at least one bounded adapter can produce the named result
+with retained evidence. Some rows describe structure or observations; others
+describe modeled operations. It does not mean every syntax, library, dynamic
+dispatch form, or artifact is supported. `observational` means retained features
+may help an analyst but are deliberately too weak for an operation. `partial`
+marks an unresolved part of the analysis; `deferred` means no dedicated model
+is implemented. The report records which limits affected a particular input.
 
 Capability rules require operation-backed `CORROBORATED` support. A static
 `CONNECTED` result means only that the retained graph reaches the operation
 from a declared root; it is never observed execution or successful effect.
 
-`osascript` file, inline, stdin, and appended-target selection share one bounded
-option profile. Interactive mode loads a supplied program without automatically
-executing it; that input does not become an execution target. Unsupported
-languages, option aliases, malformed options, and exhausted parsing budgets do
-not establish program execution. Script arguments do not change host options.
-
-Native static argument vectors require a terminating null pointer and bounded
-NUL-terminated strings, including valid empty arguments. Their bindings retain
-the vector terminator as evidence. Argument-dependent classifications require
-the complete binding and its evidence to fit the report budgets.
-
-Filesystem flow correlation requires compatible path interpretation as well as
-source order and execution context. Shell relative paths join only within a
-retained stable working-directory context; current-home expansion has a separate
-context. Directory changes, HOME changes and unsupported state-changing syntax
-invalidate the applicable proof. Quoted or escaped tilde paths are literal;
-named-user and shell-specific tilde expansions remain unresolved for correlation.
-Other adapters do not acquire a working-directory proof merely from equal
-relative operand text. Intervening modeled mutations with unresolved file targets
-also prevent attributing earlier produced bytes to a later consumer.
-
-Command recognizers distinguish shell source from decoded executable argv.
-Only exact raw shell words establish redirection or current-home expansion;
-quoted operators and literal tilde/HOME operands do not establish startup-file
-locations. Closed stdout/stderr file redirections and `tee` operands retain
-neutral file writes, including ordinary overwrites that invalidate staged-file
-lineage. Redirection words are removed from command argv. Input redirection and
-heredoc byte consumption remain partial, as do unsupported embedded operators
-and descriptor destinations. A complete decoded process request remains visible
-when no more specific action is modeled. External wrappers do not acquire shell
-builtin or assignment syntax merely from their executable operands.
-
-Python module identity distinguishes rebinding a local name from mutating the
-shared module object. Member writes, module escapes, and supported submodule
-escapes invalidate affected aliases; reimporting the cached module does not
-restore its API proof. Bounded logical statements preserve multiline binding
-targets. General module-alias propagation, dynamic namespace changes, and
-interprocedural effects are not resolved. Network response-to-file attribution
-requires a closed binary write form and retains the request, import, and write
-evidence; unsupported or mutated response flows remain partial.
-
-JavaScript AST call operands support bounded primitive-string bindings from
-unwritten lexical declarations and function-local variables, all-string
-concatenation, untagged string templates, and complete literal argv arrays.
-Declaration, transformation, and call evidence are retained. Top-level `var`
-exposure, captured values, mutable bound arrays, dynamic coercions, and
-incompatible function/block proof contexts remain unresolved. Existing host,
-namespace, mutation, launch-option, and capability-support requirements apply.
-Unpaired UTF-16 surrogates remain unresolved rather than becoming replacement
-characters. A proved process API request remains visible when its command has
-no more specific supported shell semantics; that alone does not resolve an
-executable or establish downstream behavior.
-AST namespace proofs from incompatible function scopes remain observational
-with explicit coverage. Whole-file loader shadowing, namespace escapes, and
-mutation checks also apply to leading IIFEs; a wrapper is not reparsed in
-isolation to bypass those checks.
-
-JavaScript HTTP API destinations require a complete supported URL operand.
-URLs found inside prose or unsupported values remain observations; they are
-not selected endpoints. An exact unshadowed `fetch` request with an unresolved
-destination retains a neutral network operation with an unknown endpoint.
-Neither the call nor its static connectivity establishes successful contact.
-
-JXA Standard Additions shell calls reuse the bounded primitive-string resolver.
-A stable program-level current-application receiver and preceding enablement
-are still required. Assigned, returned, and chained call results are admitted;
-function and branch calls retain their own scopes with unknown connectivity.
-Receiver mutation, escape, dynamic host identity, and incompatible value proof
-contexts prevent promotion. Helper returns, shell output, and native bridge APIs
-are not evaluated, and Node API semantics are not applied to JXA.
+## Coverage by technique
 
 | Area | Technique | Typed model | Adapters | Status and boundary |
 | --- | --- | --- | --- | --- |
@@ -101,7 +35,7 @@ are not evaluated, and Node API semantics are not applied to JXA.
 | Structured observables | Complete embedded X.509 certificates | `cryptographic.certificate` Feature with DER SHA-256 fingerprint and bounded identity fields | binary and text byte streams | supported only for a complete bounded PEM block that parses as X.509; summaries do not repeat certificate bytes, and trust, chain construction, revocation, signing use, and runtime use are not evaluated |
 | Structured observables | Complete embedded private keys | `cryptographic.private_key` Feature with public-key SPKI SHA-256 fingerprint | binary and text byte streams | supported for bounded RSA, EC, and PKCS8 signing-key PEM material validated by the standard-library parsers, including blocks adjacent to pooled constants; key bytes are omitted, runtime use is not established, and OpenSSH private-key validation remains unsupported with explicit partial coverage |
 | Structured observables | JavaScript literals beyond the structural token ceiling | unscoped `network.url` and `script.sensitive_resource` Features | bounded ordinary quoted literals in the already capped source bytes | observational only; exact URLs and supported sensitive paths retain direct evidence with `UNKNOWN` connectivity, while slash-ambiguous or malformed syntax fails closed and no import, call, operation, communication, or capability is inferred |
-| Obfuscation | Exact encoded literals and encrypted/packed native content | derived Features with source lineage, or explicit coverage | bounded base64 decoding and Mach-O encryption metadata | canonical bounded base64 literals are supported; split constants, custom encodings, runtime decryption, packers, and encrypted Mach-O code remain partial rather than guessed |
+| Obfuscation | Exact encoded literals and encrypted/packed native content | derived Features with source lineage, or explicit coverage | bounded base64 decoding and Mach-O encryption metadata | canonical bounded base64 literals and supported immutable string-array forms retain source lineage; arbitrary split constants and custom encodings remain unresolved; nonzero `cryptid` or `SG_PROTECTED_VERSION_1` suppresses behavioral byte analysis for the affected Mach-O slice; runtime decryption and unpacking are not implemented; sampled entropy and section names are observations, not packing or malware verdicts |
 | Anti-analysis | Debugger, VM, and environment checks | neutral process/system query operations and technical primitives | exact commands and located native API calls | technical primitives may be retained, but anti-analysis intent is not claimed without exact arguments and control-flow context; a `ptrace` or `sysctl` call alone is not an evasion verdict |
 | Persistence | LaunchAgent and LaunchDaemon | `launchd.job.*` | plist, shell, package scripts, native source, Mach-O | supported when a declaration, installation, load, or registration action is established; shell path writes require a direct `.plist` child of a canonical system, root, or user launchd directory, reject staged/nested lookalikes, and leave `cp`/`mv`/`install` final identity unresolved while retaining the literal destination operand; a flat-PKG payload path is installed context only when the parsed XAR topology pairs it with the same component's bounded `PackageInfo` and an exact absolute `install-location`; ZIP lookalikes, malformed or missing metadata, relocated paths, and recursively embedded archives remain declarations; embedded plist data alone is observational |
 | Persistence | Login item and `SMAppService` | `login-item.*`, `launchd.job.register` | Swift/Objective-C source, Mach-O, structural app metadata | supported where service kind and registration receiver are exact; legacy `SMLoginItemSetEnabled` requires a literal `true` argument in source, while `false`, dynamic booleans, and the ambiguous binary call remain non-capabilities; unresolved Objective-C receiver identity remains heuristic |
@@ -130,6 +64,83 @@ a called cryptographic API proves data transformation support, not ransomware.
 Concrete resource and operation-flow rules remain responsible for those
 stronger conclusions.
 
+## Adapter boundaries
+
+### Native arguments
+
+Native static argument vectors require a terminating null pointer and bounded
+NUL-terminated strings, including valid empty arguments. Their bindings retain
+the vector terminator as evidence. Argument-dependent classifications require
+the complete binding and its evidence to fit the report budgets.
+
+### Shell commands and file flow
+
+Filesystem flow correlation requires compatible path interpretation as well as
+source order and execution context. Shell relative paths join only within a
+retained stable working-directory context; current-home expansion has a separate
+context. Directory changes, HOME changes and unsupported state-changing syntax
+invalidate the applicable proof. Quoted or escaped tilde paths are literal;
+named-user and shell-specific tilde expansions remain unresolved for correlation.
+Other adapters do not acquire a working-directory proof merely from equal
+relative operand text. Intervening modeled mutations with unresolved file targets
+also prevent attributing earlier produced bytes to a later consumer.
+
+Command recognizers distinguish shell source from decoded executable argv.
+Only exact raw shell words establish redirection or current-home expansion;
+quoted operators and literal tilde/HOME operands do not establish startup-file
+locations. Closed stdout/stderr file redirections and `tee` operands retain
+neutral file writes, including ordinary overwrites that invalidate staged-file
+lineage. Redirection words are removed from command argv. Input redirection and
+heredoc byte consumption remain partial, as do unsupported embedded operators
+and descriptor destinations. A complete decoded process request remains visible
+when no more specific action is modeled. External wrappers do not acquire shell
+builtin or assignment syntax merely from their executable operands.
+
+### Python
+
+Python module identity distinguishes rebinding a local name from mutating the
+shared module object. Member writes, module escapes, and supported submodule
+escapes invalidate affected aliases; reimporting the cached module does not
+restore its API proof. Bounded logical statements preserve multiline binding
+targets. General module-alias propagation, dynamic namespace changes, and
+interprocedural effects are not resolved. Network response-to-file attribution
+requires a closed binary write form and retains the request, import, and write
+evidence; unsupported or mutated response flows remain partial. Selected URL
+arguments must be complete values, not substrings of larger strings. Known
+file/data transports do not establish network operations.
+
+### JavaScript
+
+JavaScript AST call operands support bounded primitive-string bindings from
+unwritten lexical declarations and function-local variables, all-string
+concatenation, untagged string templates, and complete literal argv arrays.
+Declaration, transformation, and call evidence are retained. Top-level `var`
+exposure, captured values, mutable bound arrays, dynamic coercions, and
+incompatible function/block proof contexts remain unresolved. Existing host,
+namespace, mutation, launch-option, and capability-support requirements apply.
+Unpaired UTF-16 surrogates remain unresolved rather than becoming replacement
+characters. A proved process API request remains visible when its command has
+no more specific supported shell semantics; that alone does not resolve an
+executable or establish downstream behavior.
+AST namespace proofs from incompatible function scopes remain observational
+with explicit coverage. Whole-file loader shadowing, namespace escapes, and
+mutation checks also apply to leading IIFEs; a wrapper is not reparsed in
+isolation to bypass those checks.
+
+JavaScript HTTP API destinations require a complete supported URL operand.
+URLs found inside prose or unsupported values remain observations; they are
+not selected endpoints. An exact unshadowed `fetch` request with an unresolved
+destination retains a neutral network operation with an unknown endpoint.
+Neither the call nor its static connectivity establishes successful contact.
+
+### AppleScript and JXA
+
+`osascript` file, inline, stdin, and appended-target selection share one bounded
+option profile. Interactive mode loads a supplied program without automatically
+executing it; that input does not become an execution target. Unsupported
+languages, option aliases, malformed options, and exhausted parsing budgets do
+not establish program execution. Script arguments do not change host options.
+
 AppleScript local string resolution retains exact `set` assignments, immutable
 text aliases, concatenation, parentheses, and `quoted form`, with declaration
 and call evidence. Names are case-insensitive. Unknown writes, opaque calls,
@@ -140,6 +151,16 @@ without evaluating helpers or inferring their return values. Scoped derived
 handlers that cannot retain valid causal context remain explicitly partial.
 When source encoding is unresolved, only ASCII string operands are resolved;
 legacy Unicode values are not decoded by guesswork.
+
+JXA Standard Additions shell calls reuse the bounded primitive-string resolver.
+A stable program-level current-application receiver and preceding enablement
+are still required. Assigned, returned, and chained call results are admitted;
+function and branch calls retain their own scopes with unknown connectivity.
+Receiver mutation, escape, dynamic host identity, and incompatible value proof
+contexts prevent promotion. Helper returns, shell output, and native bridge APIs
+are not evaluated, and Node API semantics are not applied to JXA.
+
+## Host evidence and validation
 
 Endpoint state is intentionally outside this artifact analyzer. Background
 Task Management records, process ancestry, EndpointSecurity events, current

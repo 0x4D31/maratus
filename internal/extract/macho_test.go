@@ -2646,24 +2646,50 @@ func TestEncryptedMachOTextIsNeverDecoded(t *testing.T) {
 	data := append(encodeTestX86CALL(0x1000, 0x1010), bytes.Repeat([]byte{0x90}, 12)...)
 	content := artifact.Content{NodeID: "node-1", LogicalPath: "sample"}
 
-	var encrypted behavior.Graph
-	extractMachOFile(&encrypted, content, makeFile(1, data), "x86_64", data, artifact.Options{})
-	for _, feature := range encrypted.Features {
-		if feature.Key == "macho.function_call" || feature.Key == "macho.import_call" {
-			t.Fatalf("ciphertext produced executable-code feature: %#v", feature)
-		}
-	}
-	if len(encrypted.Operations) != 0 || len(encrypted.Scopes) != 0 {
-		t.Fatalf("ciphertext produced function-scoped behavior: scopes=%#v operations=%#v", encrypted.Scopes, encrypted.Operations)
-	}
-	foundCoverage := false
-	for _, coverage := range encrypted.Coverage {
-		if coverage.AnalysisArea == "macho-byte-analysis/x86_64" && coverage.Status == "partial" && strings.Contains(coverage.Detail, "skipped byte-derived") {
-			foundCoverage = true
-		}
-	}
-	if !foundCoverage {
-		t.Fatalf("encrypted slice did not disclose skipped byte analysis: %#v", encrypted.Coverage)
+	for name, mutate := range map[string]func(*macho.File){
+		"nonzero cryptid": func(file *macho.File) {
+			binary.LittleEndian.PutUint32(file.Loads[1].Raw()[16:20], 1)
+		},
+		"protected segment": func(file *macho.File) {
+			file.Loads[0].(*macho.Segment).Flag = 0x8
+		},
+		"protected flag among other flags": func(file *macho.File) {
+			file.Loads[0].(*macho.Segment).Flag = 0x9
+		},
+		"protected segment after clear marker": func(file *macho.File) {
+			file.Loads = append(file.Loads, &macho.Segment{SegmentHeader: macho.SegmentHeader{Name: "__DATA", Flag: 0x8}})
+		},
+		"encrypted command after clear marker": func(file *macho.File) {
+			other := append(macho.LoadBytes(nil), file.Loads[1].Raw()...)
+			binary.LittleEndian.PutUint32(other[16:20], 1)
+			file.Loads = append(file.Loads, other)
+		},
+		"clear marker after encrypted command": func(file *macho.File) {
+			other := append(macho.LoadBytes(nil), file.Loads[1].Raw()...)
+			binary.LittleEndian.PutUint32(file.Loads[1].Raw()[16:20], 1)
+			file.Loads = append(file.Loads, other)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := makeFile(0, data)
+			mutate(file)
+			var encrypted behavior.Graph
+			extractMachOFile(&encrypted, content, file, "x86_64", data, artifact.Options{})
+			for _, feature := range encrypted.Features {
+				if feature.Key == "macho.function_call" || feature.Key == "macho.import_call" {
+					t.Fatalf("protected bytes produced executable-code feature: %#v", feature)
+				}
+			}
+			if len(encrypted.Operations) != 0 || len(encrypted.Scopes) != 0 {
+				t.Fatalf("protected bytes produced function-scoped behavior: scopes=%#v operations=%#v", encrypted.Scopes, encrypted.Operations)
+			}
+			if !hasArtifactProperty(encrypted.ArtifactProperties, "macho-encryption", "encrypted", behavior.SupportDirect) || hasArtifactProperty(encrypted.ArtifactProperties, "macho-encryption", "not-encrypted", behavior.SupportDirect) {
+				t.Fatalf("encryption state is absent or contradictory: %#v", encrypted.ArtifactProperties)
+			}
+			if !hasFeatureArchitecture(&encrypted, "macho.filetype", macho.TypeExec.String(), "x86_64") || !hasPartialCoverageScope(encrypted.Coverage, "macho-byte-analysis/x86_64") {
+				t.Fatalf("protected slice lost structure or coverage: %#v", encrypted.Coverage)
+			}
+		})
 	}
 
 	var plaintext behavior.Graph
@@ -2671,6 +2697,85 @@ func TestEncryptedMachOTextIsNeverDecoded(t *testing.T) {
 	if !localCallFeatureExists(&plaintext, "node-1", "x86_64", "main", "helper") {
 		t.Fatalf("unencrypted positive control lost valid local-call analysis: %#v", plaintext.Features)
 	}
+}
+
+func TestMachOProtectionCheckFailsClosedAtEvidenceLimit(t *testing.T) {
+	clear := make([]byte, 24)
+	binary.LittleEndian.PutUint32(clear[0:4], lcEncryptionInfo64)
+	binary.LittleEndian.PutUint32(clear[4:8], uint32(len(clear)))
+	file := &macho.File{ByteOrder: binary.LittleEndian, Loads: []macho.Load{
+		macho.LoadBytes(clear),
+		&macho.Segment{SegmentHeader: macho.SegmentHeader{Name: "__TEXT", Flag: 0x8}},
+	}}
+	graph := behavior.Graph{EvidenceLimit: 1}
+	if !extractEncryptionInfo(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "sample"}, file, "x86_64") {
+		t.Fatal("incomplete protection check authorized byte analysis")
+	}
+	if hasArtifactProperty(graph.ArtifactProperties, "macho-encryption", "not-encrypted", behavior.SupportDirect) {
+		t.Fatal("incomplete protection check claimed unencrypted content")
+	}
+	graph.FinalizeLimits()
+	if len(graph.Coverage) == 0 || graph.Coverage[0].Status != "partial" {
+		t.Fatalf("protection-check budget loss was silent: %#v", graph.Coverage)
+	}
+}
+
+func TestExtractMachOProtectedSegments(t *testing.T) {
+	makeImage := func(order binary.ByteOrder, is64 bool, flags uint32) []byte {
+		var buf bytes.Buffer
+		write := func(value any) {
+			if err := binary.Write(&buf, order, value); err != nil {
+				t.Fatal(err)
+			}
+		}
+		header := macho.FileHeader{Magic: macho.Magic32, Cpu: macho.Cpu386, SubCpu: 3, Type: macho.TypeExec, Ncmd: 1, Cmdsz: 56}
+		if is64 {
+			header.Magic, header.Cpu, header.Cmdsz = macho.Magic64, macho.CpuAmd64, 72
+		}
+		write(header)
+		if is64 {
+			write(uint32(0))
+			segment := macho.Segment64{Cmd: macho.LoadCmdSegment64, Len: 72, Addr: 0x1000, Memsz: 8192, Filesz: 8192, Maxprot: 5, Prot: 5, Flag: flags}
+			copy(segment.Name[:], "__TEXT")
+			write(segment)
+		} else {
+			segment := macho.Segment32{Cmd: macho.LoadCmdSegment, Len: 56, Addr: 0x1000, Memsz: 8192, Filesz: 8192, Maxprot: 5, Prot: 5, Flag: flags}
+			copy(segment.Name[:], "__TEXT")
+			write(segment)
+		}
+		return append(buf.Bytes(), make([]byte, 8192-buf.Len())...)
+	}
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		for _, is64 := range []bool{false, true} {
+			for _, flags := range []uint32{0, 4, 8, 9} {
+				t.Run(fmt.Sprintf("%s/64=%v/flags=%x", order, is64, flags), func(t *testing.T) {
+					data := makeImage(order, is64, flags)
+					original := bytes.Clone(data)
+					var graph behavior.Graph
+					ExtractMachO(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "sample", Data: data}, artifact.Options{})
+					arch := "i386"
+					if is64 {
+						arch = "x86_64"
+					}
+					protected := flags&8 != 0
+					if !hasFeatureArchitecture(&graph, "macho.filetype", macho.TypeExec.String(), arch) || hasArtifactProperty(graph.ArtifactProperties, "macho-encryption", "encrypted", behavior.SupportDirect) != protected || hasPartialCoverageScope(graph.Coverage, "macho-byte-analysis/"+arch) != protected {
+						t.Fatalf("protected-segment extraction: properties=%#v coverage=%#v", graph.ArtifactProperties, graph.Coverage)
+					}
+					if !bytes.Equal(data, original) {
+						t.Fatal("analysis changed input bytes")
+					}
+				})
+			}
+		}
+	}
+	t.Run("protection is slice-local", func(t *testing.T) {
+		data := testExtractFatMachO(binary.BigEndian, false, makeImage(binary.LittleEndian, true, 8), testExtractThinMachO(macho.CpuArm64, 0))
+		var graph behavior.Graph
+		ExtractMachO(&graph, artifact.Content{NodeID: "node-1", LogicalPath: "universal", Data: data}, artifact.Options{})
+		if !hasFeatureArchitecture(&graph, "macho.filetype", macho.TypeExec.String(), "arm64") || !hasPartialCoverageScope(graph.Coverage, "macho-byte-analysis/x86_64") || hasPartialCoverageScope(graph.Coverage, "macho-byte-analysis/arm64") {
+			t.Fatalf("protection leaked across slices or hid a sibling: %#v", graph.Coverage)
+		}
+	})
 }
 
 func TestMachOLCMainReachabilityTraversesPremarkedEntrypoint(t *testing.T) {

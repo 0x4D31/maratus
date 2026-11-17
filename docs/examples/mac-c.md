@@ -5,10 +5,15 @@ interesting results below come from `Mac.c/stealer.scpt`: a Keychain request,
 a hidden-answer dialog, and a system-information query. They are separate from
 the binary's native API inventory.
 
+- Input: `Mac.c.zip`
 - Archive SHA-256: `327dc7e90ce3570f30915c9943b33aadd96ef4994a4a669d533b0e8daec04de4`
 - Script SHA-256: `393acc8ef94ab8ba0abf7a769e451d5434d4acdbda0b60966bfac4b40e4d6875`
 - Source: [Objective-See/Malware, pinned revision](https://github.com/objective-see/Malware/blob/16c4f3bf685b1ed95e83d39d6b92c6af64315531/Mac.c.zip)
 - Analyzer: [Maratus `38b6978`](https://github.com/0x4D31/maratus/commit/38b6978697141b34a9c51d1cdf3fa152b6349229), default analysis settings. Terminal output rendered with [`551d6b9`](https://github.com/0x4D31/maratus/commit/551d6b9ddad39c25d822f539b37ab3339b7a13f7).
+
+These are historical results from the builds pinned above. Counts, IDs, support
+levels, and excerpts describe that run; a current scan may differ. See the
+[current coverage ledger](../technique-coverage.md) for supported analysis.
 
 ## Terminal excerpt
 
