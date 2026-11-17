@@ -147,8 +147,9 @@ jobs:
             install -m 0644 docs/*.md "dist/$name/docs/"
             mkdir -p "dist/$name/docs/examples"
             install -m 0644 docs/examples/*.md "dist/$name/docs/examples/"
-            mkdir -p "dist/$name/skills/maratus-triage"
+            mkdir -p "dist/$name/skills/maratus-triage/references"
             install -m 0644 skills/maratus-triage/SKILL.md "dist/$name/skills/maratus-triage/SKILL.md"
+            install -m 0644 skills/maratus-triage/references/*.md "dist/$name/skills/maratus-triage/references/"
             install -m 0644 CONTRIBUTING.md "dist/$name/CONTRIBUTING.md"
             install -m 0644 LICENSE "dist/$name/LICENSE"
             if [[ -f NOTICE ]]; then

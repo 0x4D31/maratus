@@ -27,6 +27,31 @@ control. For analysis changes, include a supported positive, a close negative,
 and a benign control using the same API or packaging format. See
 [Extending Maratus](extending.md) for evidence and scope requirements.
 
+## Review coverage
+
+Start a change review by mapping each changed contract to its consumers and
+adjacent failure cases. Record the checks performed and unresolved limitations;
+a green test run alone does not establish semantic coverage.
+
+| Area | Required comparisons |
+| --- | --- |
+| Parser boundaries | Valid, truncated, malformed, exact-limit, over-limit, repeated offsets, and cumulative work or allocation |
+| Native evidence | Per-slice identity, address/file-offset bounds, supported and unsupported metadata, signing integrity versus trust |
+| Source semantics | Exact call versus lookalike; import, alias, rebinding, member mutation, escape, reimport, and scope; known versus unresolved operands |
+| Activation | Declared entry versus containment, selected versus ambiguous target, connected versus unconnected operation |
+| Reports | Exact evidence lineage, explicit coverage loss, deterministic JSON, strict reload, and rendered output |
+| Documentation and packaging | Executable examples, stated limits, local links, portable skill layout, and complete release contents |
+
+For a confirmed defect, vary the failing dimension across the other consumers
+of the same proof or parser. Include a nearby valid control to catch excessive
+invalidation. Stop at the documented model boundary: unsupported forms need an
+explicit limitation, not speculative interpretation. Record platform checks that
+cannot be performed locally as outstanding release requirements.
+
+The optional [Mach-O comparison helper](https://github.com/0x4D31/maratus/tree/main/tools/differential) supplies
+an independent parser view during development. It is not a runtime dependency
+or a replacement for source-backed controls.
+
 ## Testing real artifacts
 
 Use an isolated, disposable environment with outbound networking denied and
