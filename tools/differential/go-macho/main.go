@@ -23,16 +23,17 @@ type section struct {
 }
 
 type result struct {
-	Schema        string    `json:"schema"`
-	InputBytes    int64     `json:"input_bytes"`
-	Magic         string    `json:"magic"`
-	CPU           string    `json:"cpu"`
-	LoadCommands  uint32    `json:"load_commands"`
-	Sections      []section `json:"sections"`
-	Imports       []string  `json:"imports,omitempty"`
-	ImportError   string    `json:"import_error,omitempty"`
-	Libraries     []string  `json:"libraries,omitempty"`
-	FunctionCount int       `json:"function_count"`
+	Schema                string    `json:"schema"`
+	InputBytes            int64     `json:"input_bytes"`
+	Magic                 string    `json:"magic"`
+	CPU                   string    `json:"cpu"`
+	LoadCommands          uint32    `json:"load_commands"`
+	Sections              []section `json:"sections"`
+	Imports               []string  `json:"imports,omitempty"`
+	ImportError           string    `json:"import_error,omitempty"`
+	Libraries             []string  `json:"libraries,omitempty"`
+	FunctionCount         int       `json:"function_count"`
+	FunctionStartsPresent bool      `json:"function_starts_present"`
 }
 
 func main() {
@@ -92,7 +93,12 @@ func inspect(path string) (_ result, err error) {
 	out := result{
 		Schema: "maratus.development.go-macho-differential.v1", InputBytes: info.Size(),
 		Magic: file.Magic.String(), CPU: file.CPU.String(), LoadCommands: file.NCommands,
-		FunctionCount: len(file.GetFunctions()), Libraries: file.ImportedLibraries(),
+		Libraries:             file.ImportedLibraries(),
+		FunctionStartsPresent: file.FunctionStarts() != nil,
+	}
+	// GetFunctions otherwise falls back to scanning arm64e PAC prologues.
+	if out.FunctionStartsPresent {
+		out.FunctionCount = len(file.GetFunctions())
 	}
 	for _, item := range file.Sections {
 		out.Sections = append(out.Sections, section{Segment: item.Seg, Name: item.Name, Address: item.Addr, Size: item.Size, Offset: item.Offset})

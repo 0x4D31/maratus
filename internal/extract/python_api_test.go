@@ -654,3 +654,107 @@ func TestPythonMemberReadsPreserveAPIIdentity(t *testing.T) {
 		})
 	}
 }
+
+// Apply every target form to distinct semantic consumers of the binding proof.
+func TestPythonSharedModuleMutationMatrix(t *testing.T) {
+	mutations := []string{
+		"other.MEMBER = fake",
+		"(other.MEMBER, spare) = fake, None",
+		"spare = other.MEMBER = fake",
+		"other.MEMBER += fake",
+		"del (other.MEMBER)",
+		"for other.MEMBER in replacements:\n    pass",
+		"with (context() as other.MEMBER, context() as spare):\n    pass",
+		"with (context() as (other.MEMBER), context() as spare):\n    pass",
+		"other.__dict__[\"MEMBER\"] = fake",
+		"escaped = other\nescaped.MEMBER = fake",
+		"change(other)",
+	}
+	for _, api := range []string{"os.remove", "requests.get", "subprocess.run", "shutil.unpack_archive"} {
+		parts := strings.Split(api, ".")
+		for _, mutation := range mutations {
+			for _, reimport := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/reimport=%t", api, mutation, reimport), func(t *testing.T) {
+					source := "import " + parts[0] + "\nimport " + parts[0] + " as other\n" + strings.ReplaceAll(mutation, "MEMBER", parts[1]) + "\n"
+					if reimport {
+						source += "import " + parts[0] + "\n"
+					}
+					source += api + "(\"https://unit.invalid/payload\")\n"
+					graph := pythonAPIExtract(source)
+					if len(graph.Operations) != 0 {
+						t.Fatalf("mutated shared module acquired original semantics: %#v", graph.Operations)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestPythonModuleMutationAcrossImportForms(t *testing.T) {
+	for name, source := range map[string]string{
+		"submodule escape":    "import os\npaths = os.path\npaths.exists = fake\nos.path.exists(\"/tmp/a\")\n",
+		"qualified submodule": "import os\nimport os.path as paths\npaths.exists = fake\nos.path.exists(\"/tmp/a\")\n",
+		"from submodule":      "import os\nfrom os import path as paths\npaths.exists = fake\nos.path.exists(\"/tmp/a\")\n",
+		"local alias":         "import requests\ndef replace():\n    import requests as other\n    other.get = fake\nreplace()\nrequests.get(\"https://unit.invalid/p\")\n",
+		"reimported alias":    "import requests\nimport requests as other\ndel other\nimport requests as other\nother.get = fake\nrequests.get(\"https://unit.invalid/p\")\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			graph := pythonAPIExtract(source)
+			if len(graph.Operations) != 0 {
+				t.Fatalf("mutated shared module acquired original semantics: %#v", graph.Operations)
+			}
+		})
+	}
+}
+
+func TestPythonLocalRebindingDoesNotMutateOtherAlias(t *testing.T) {
+	for _, localChange := range []string{"other = fake", "del other", "for other in items:\n    pass", "with (context() as other, context() as spare):\n    pass"} {
+		t.Run(localChange, func(t *testing.T) {
+			graph := pythonAPIExtract("import os\nimport os as other\n" + localChange + "\nos.remove(\"/tmp/a\")\n")
+			if len(pythonAPIOperationsByKind(graph, behavior.OperationFileDelete)) != 1 {
+				t.Fatalf("local rebinding invalidated another alias: %#v", graph.Operations)
+			}
+		})
+	}
+}
+
+func TestPythonMultilineMemberTargetsInvalidateAliases(t *testing.T) {
+	for _, target := range []string{
+		"(\nother.remove, spare\n) = fake, None",
+		"(other.remove,\n spare) = fake, None",
+		"other.remove, \\\nspare = fake, None",
+		"with (\ncontext() as other.remove,\ncontext() as spare\n):\n    pass",
+	} {
+		t.Run(target, func(t *testing.T) {
+			graph := pythonAPIExtract("import os\nimport os as other\n" + target + "\nos.remove(\"/tmp/a\")\n")
+			if len(pythonAPIOperationsByKind(graph, behavior.OperationFileDelete)) != 0 {
+				t.Fatalf("multiline mutation preserved API identity: %#v", graph.Operations)
+			}
+		})
+	}
+}
+
+func TestPythonLogicalStatementControls(t *testing.T) {
+	for _, read := range []string{
+		"values = (\nos.remove,\nother\n)",
+		"check(\nvalue=os.remove\n)",
+		"with (\ncontext() as handle,\ncontext() as other\n):\n    check(os.remove)",
+	} {
+		t.Run(read, func(t *testing.T) {
+			graph := pythonAPIExtract("import os\n" + read + "\nos.remove(\"/tmp/a\")\n")
+			if len(pythonAPIOperationsByKind(graph, behavior.OperationFileDelete)) != 1 {
+				t.Fatalf("multiline read invalidated API identity: %#v", graph.Operations)
+			}
+		})
+	}
+	for _, source := range []string{
+		"import os\n(\n" + strings.Repeat("other,\n", maxSemanticContinuationLines+1) + "os.remove) = fake\nos.remove(\"/tmp/a\")\n",
+		"import os\n(\n" + strings.Repeat("x", maxSemanticContinuationBytes) + ",os.remove) = fake\nos.remove(\"/tmp/a\")\n",
+		"import os\n(\nos.remove\n",
+	} {
+		graph := pythonAPIExtract(source)
+		if len(graph.Operations) != 0 || !hasPartialCoverageScope(graph.Coverage, "python-lexical-scope-analysis") {
+			t.Fatalf("unbounded or incomplete statement did not stop semantics: operations=%#v coverage=%#v", graph.Operations, graph.Coverage)
+		}
+	}
+}

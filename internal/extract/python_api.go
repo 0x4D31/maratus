@@ -291,11 +291,21 @@ func scanPythonStableAPIBindings(lines []string, offsets []int64) pythonStableAP
 	result := pythonStableAPIBindings{
 		bindings: map[string]pythonAPIBindingProof{}, evidenceIDs: map[string]string{}, builtinOpenSafe: true,
 	}
-	for index, raw := range lines {
+	for index := 0; index < len(lines); index++ {
+		raw := lines[index]
 		if len(raw) == 0 || raw[0] == ' ' || raw[0] == '\t' {
 			continue
 		}
 		line := stripSemanticComment("python", raw, new(bool))
+		_, line, end, incomplete := joinPythonLogicalLine(lines, index, raw, line, new(bool))
+		if incomplete {
+			result.bindings = map[string]pythonAPIBindingProof{}
+			result.builtinOpenSafe = false
+			result.invalidated = true
+			return result
+		}
+		lineIndex := index
+		index = end
 		parsed := parsePythonImportLine(line)
 		if parsed.disposition != pythonImportRecognized {
 			continue
@@ -323,23 +333,51 @@ func scanPythonStableAPIBindings(lines []string, offsets []int64) pythonStableAP
 				continue
 			}
 			offset := int64(0)
-			if index < len(offsets) {
-				offset = offsets[index] + int64(observation.byteOffset)
+			if lineIndex < len(offsets) {
+				offset = offsets[lineIndex] + int64(observation.byteOffset)
 			}
 			result.bindings[name] = pythonAPIBindingProof{
-				name: name, canonical: canonical, text: strings.TrimSpace(raw), line: index + 1, offset: offset,
+				name: name, canonical: canonical, text: strings.TrimSpace(raw), line: lineIndex + 1, offset: offset,
 			}
 		}
 	}
 
-	for _, raw := range lines {
+	mutatedModules := map[string]bool{}
+	// Retain candidate identities after their proof is invalidated. A later
+	// reimport, including a function-local alias, can mutate the same module.
+	candidates := map[string]pythonAPIBindingProof{}
+	for index := 0; index < len(lines); index++ {
+		raw := lines[index]
 		line := stripSemanticComment("python", raw, new(bool))
+		_, line, end, incomplete := joinPythonLogicalLine(lines, index, raw, line, new(bool))
+		if incomplete {
+			result.bindings = map[string]pythonAPIBindingProof{}
+			result.builtinOpenSafe = false
+			result.invalidated = true
+			return result
+		}
+		index = end
 		code := pythonCodeContext(line)
 		trimmed := strings.TrimSpace(code)
 		parsed := parsePythonImportLine(line)
 		if parsed.disposition == pythonImportRecognized {
 			if pythonImportResultHasWildcard(parsed) {
 				result.dynamicNamespace = true
+			}
+			for _, observation := range parsed.observations {
+				if pythonImportedModuleEscapes(observation) {
+					mutatedModules[pythonModuleRoot(observation.value)] = true
+				}
+				name, canonical, supported := pythonAPIModuleBinding(observation)
+				if !supported {
+					continue
+				}
+				key := name + "\x00" + canonical
+				if _, present := candidates[key]; !present && len(candidates) >= maxPythonAPIBindings {
+					result.limited = true
+					continue
+				}
+				candidates[key] = pythonAPIBindingProof{name: name, canonical: canonical}
 			}
 			continue
 		}
@@ -349,6 +387,11 @@ func scanPythonStableAPIBindings(lines []string, offsets []int64) pythonStableAP
 		if !pythonBuiltinNameUsedOnlyAsDirectCall(code, "open") {
 			result.builtinOpenSafe = false
 		}
+		for _, candidate := range candidates {
+			if pythonModuleObjectMayChange(code, candidate.name, candidate.canonical) {
+				mutatedModules[pythonModuleRoot(candidate.canonical)] = true
+			}
+		}
 		for name := range result.bindings {
 			if !pythonStableBindingUsesOnlyQualifiedReads(code, name) {
 				delete(result.bindings, name)
@@ -356,7 +399,13 @@ func scanPythonStableAPIBindings(lines []string, offsets []int64) pythonStableAP
 			}
 		}
 	}
-	if result.dynamicNamespace {
+	for name, proof := range result.bindings {
+		if mutatedModules[pythonModuleRoot(proof.canonical)] {
+			delete(result.bindings, name)
+			result.invalidated = true
+		}
+	}
+	if result.dynamicNamespace || result.limited {
 		result.bindings = map[string]pythonAPIBindingProof{}
 		result.builtinOpenSafe = false
 	}
@@ -376,19 +425,22 @@ type pythonOrderedAPIBinding struct {
 // A dedent, ambiguous write, wildcard import, dynamic namespace access, bad
 // indentation, or malformed import invalidates the affected ordered proof.
 type pythonOrderedAPIBindings struct {
-	byScope       map[string]map[string]pythonOrderedAPIBinding
-	shadowed      map[string]map[string]bool
-	blockFallback map[string]bool
-	fallbackNames map[string]bool
-	events        int
-	limited       bool
-	badIndent     bool
+	byScope          map[string]map[string]pythonOrderedAPIBinding
+	shadowed         map[string]map[string]bool
+	blockFallback    map[string]bool
+	fallbackNames    map[string]bool
+	fallbackBindings map[string]pythonAPIBindingProof
+	mutatedModules   map[string]bool
+	events           int
+	limited          bool
+	badIndent        bool
 }
 
 type pythonOrderedAPIBindingState struct {
-	proofs        map[string]pythonAPIBindingProof
-	shadowed      map[string]bool
-	blockFallback bool
+	proofs         map[string]pythonAPIBindingProof
+	shadowed       map[string]bool
+	blockFallback  bool
+	mutatedModules map[string]bool
 }
 
 func newPythonOrderedAPIBindings(fallback map[string]pythonAPIBindingProof) pythonOrderedAPIBindings {
@@ -397,10 +449,12 @@ func newPythonOrderedAPIBindings(fallback map[string]pythonAPIBindingProof) pyth
 		fallbackNames[name] = true
 	}
 	return pythonOrderedAPIBindings{
-		byScope:       map[string]map[string]pythonOrderedAPIBinding{},
-		shadowed:      map[string]map[string]bool{},
-		blockFallback: map[string]bool{},
-		fallbackNames: fallbackNames,
+		byScope:          map[string]map[string]pythonOrderedAPIBinding{},
+		shadowed:         map[string]map[string]bool{},
+		blockFallback:    map[string]bool{},
+		fallbackNames:    fallbackNames,
+		fallbackBindings: fallback,
+		mutatedModules:   map[string]bool{},
 	}
 }
 
@@ -435,6 +489,9 @@ func (tracker *pythonOrderedAPIBindings) observe(scopeKey, raw, line string, lin
 	}
 	if parsed.disposition == pythonImportRecognized {
 		for _, observation := range parsed.observations {
+			if pythonImportedModuleEscapes(observation) {
+				tracker.mutatedModules[pythonModuleRoot(observation.value)] = true
+			}
 			if boundName := pythonImportBoundName(observation); boundName != "" {
 				tracker.shadow(scopeKey, boundName)
 			}
@@ -443,7 +500,7 @@ func (tracker *pythonOrderedAPIBindings) observe(scopeKey, raw, line string, lin
 				continue
 			}
 			name, canonical, supported := pythonAPIModuleBinding(observation)
-			if !supported {
+			if !supported || tracker.mutatedModules[pythonModuleRoot(canonical)] {
 				continue
 			}
 			if len(scope) >= maxPythonAPIBindings {
@@ -471,6 +528,13 @@ func (tracker *pythonOrderedAPIBindings) observe(scopeKey, raw, line string, lin
 		candidates[name] = true
 	}
 	for name := range candidates {
+		proof := tracker.fallbackBindings[name]
+		if local, ok := scope[name]; ok {
+			proof = local.proof
+		}
+		if proof.canonical != "" && pythonModuleObjectMayChange(code, name, proof.canonical) {
+			tracker.mutatedModules[pythonModuleRoot(proof.canonical)] = true
+		}
 		if !pythonStableBindingUsesOnlyQualifiedReads(code, name) {
 			tracker.shadow(scopeKey, name)
 		}
@@ -489,12 +553,13 @@ func (tracker *pythonOrderedAPIBindings) stateAt(scopeKey, raw string) pythonOrd
 	if !ok {
 		return out
 	}
+	out.mutatedModules = tracker.mutatedModules
 	out.blockFallback = tracker.blockFallback[scopeKey]
 	for name := range tracker.shadowed[scopeKey] {
 		out.shadowed[name] = true
 	}
 	for name, binding := range tracker.byScope[scopeKey] {
-		if binding.indent <= indent {
+		if binding.indent <= indent && !tracker.mutatedModules[pythonModuleRoot(binding.proof.canonical)] {
 			out.proofs[name] = binding.proof
 		}
 	}
@@ -578,7 +643,7 @@ func pythonEffectiveAPIBindings(
 	proofs := map[string]pythonAPIBindingProof{}
 	if bindings != nil && !ordered.blockFallback {
 		for name, proof := range bindings.bindings {
-			if proof.line < lineNo {
+			if proof.line < lineNo && !ordered.mutatedModules[pythonModuleRoot(proof.canonical)] {
 				proofs[name] = proof
 			}
 		}
@@ -735,6 +800,53 @@ func pythonStableBindingUsesOnlyQualifiedReads(code, name string) bool {
 	return true
 }
 
+// Imports of the same package share a mutable module object. Rebinding a
+// local name does not change that object, but member writes or escaping the
+// object invalidate every alias, including later imports of the cached module.
+func pythonModuleRoot(canonical string) string {
+	root, _, _ := strings.Cut(canonical, ".")
+	return root
+}
+
+// These from-imports expose a supported mutable namespace through a binding
+// form outside the qualified-call proof model. Treat that as a module escape.
+func pythonImportedModuleEscapes(observation pythonSourceObservation) bool {
+	return observation.form == "from-import" && (observation.value == "os.path" || observation.value == "urllib.request")
+}
+
+func pythonModuleObjectMayChange(code, name, canonical string) bool {
+	targets := pythonBindingTargets(code)
+	for _, position := range pythonIdentifierPositions(code, name) {
+		if pythonIdentifierHasMemberPrefix(code, position) {
+			continue
+		}
+		cursor := pythonSkipHorizontal(code, position+len(name))
+		if cursor >= len(code) || code[cursor] != '.' {
+			if !targets.contains(position) {
+				return true
+			}
+			continue
+		}
+		if targets.contains(position) || pythonRootedMemberMutation(code, position, cursor) {
+			return true
+		}
+		// These supported qualified namespaces are modules themselves. A
+		// reference to one may escape without mentioning the imported root.
+		member, _, next, ok := pythonASCIIIdentifier(code, cursor+1)
+		if !ok {
+			return true
+		}
+		next = pythonSkipHorizontal(code, next)
+		if next < len(code) && code[next] == '.' {
+			continue
+		}
+		if canonical == "os" && member == "path" || canonical == "urllib" && member == "request" {
+			return true
+		}
+	}
+	return false
+}
+
 func pythonRootedMemberMutation(code string, root, dot int) bool {
 	prefix := strings.TrimSpace(code[:root])
 	if strings.HasSuffix(prefix, "del") && (len(prefix) == 3 || !pythonIdentifierByte(prefix[len(prefix)-4])) {
@@ -781,6 +893,7 @@ func pythonBindingTargets(code string) pythonBindingTargetRanges {
 	targetStart := 0
 	forStart := -1
 	asStart := -1
+	asDepth := 0
 	trimmed := strings.TrimSpace(code)
 	if strings.HasPrefix(trimmed, "del ") || strings.HasPrefix(trimmed, "del\t") {
 		return pythonBindingTargetRanges{{0, len(code)}}
@@ -793,9 +906,13 @@ func pythonBindingTargets(code string) pythonBindingTargetRanges {
 		case '(', '[', '{':
 			depth++
 		case ')', ']', '}':
+			if asStart >= 0 && depth == asDepth {
+				targets = append(targets, [2]int{asStart, index})
+				asStart = -1
+			}
 			depth--
 		case ':', ',':
-			if depth == 0 && asStart >= 0 {
+			if depth == asDepth && asStart >= 0 {
 				targets = append(targets, [2]int{asStart, index})
 				asStart = -1
 			}
@@ -822,6 +939,7 @@ func pythonBindingTargets(code string) pythonBindingTargetRanges {
 			forStart = -1
 		case "as":
 			asStart = end
+			asDepth = depth
 		}
 		index = end - 1
 	}

@@ -12,6 +12,7 @@ const (
 	maxTextVariableValueBytes           = 16 << 10
 	maxTextVariableValueTotalBytes      = 4 << 20
 	maxTextRequestDestinationsPerVar    = 32
+	maxTextRequestEvidencePerVar        = 64
 	maxTextRequestDestinationBytes      = 16 << 10
 	maxTextRequestValueTotalBytes       = 1 << 20
 	maxTextVariableSubstitutionsPerLine = 256
@@ -23,6 +24,7 @@ const (
 )
 
 type shellVariableKey struct{ scope, name string }
+type textRequestKey struct{ scope, name string }
 
 type textVariableState struct {
 	shellOrigins     map[shellVariableKey]string
@@ -30,6 +32,7 @@ type textVariableState struct {
 	usedShellOrigins []string
 	globals          map[string]string
 	locals           map[string]map[string]string
+	requestEvidence  map[textRequestKey][]string
 	requestGlobal    map[string][]string
 	requestLocals    map[string]map[string][]string
 	unknownGlobal    map[string]bool
@@ -47,13 +50,14 @@ type textVariableState struct {
 
 func newTextVariableState() *textVariableState {
 	return &textVariableState{
-		globals:       make(map[string]string),
-		shellOrigins:  make(map[shellVariableKey]string),
-		locals:        make(map[string]map[string]string),
-		requestGlobal: make(map[string][]string),
-		requestLocals: make(map[string]map[string][]string),
-		unknownGlobal: make(map[string]bool),
-		unknownLocals: make(map[string]map[string]bool),
+		globals:         make(map[string]string),
+		shellOrigins:    make(map[shellVariableKey]string),
+		locals:          make(map[string]map[string]string),
+		requestGlobal:   make(map[string][]string),
+		requestEvidence: make(map[textRequestKey][]string),
+		requestLocals:   make(map[string]map[string][]string),
+		unknownGlobal:   make(map[string]bool),
+		unknownLocals:   make(map[string]map[string]bool),
 	}
 }
 
@@ -169,7 +173,7 @@ func (s *textVariableState) invalidateVariable(scope, name string) bool {
 	return true
 }
 
-func (s *textVariableState) setRequestVariable(scope, name string, destinations []string) bool {
+func (s *textVariableState) setRequestVariable(scope, name string, destinations []string, evidenceIDs ...string) bool {
 	if s.limited {
 		return false
 	}
@@ -188,6 +192,11 @@ func (s *textVariableState) setRequestVariable(scope, name string, destinations 
 			return false
 		}
 		destinationBytes += int64(len(destination))
+	}
+	if len(evidenceIDs) > maxTextRequestEvidencePerVar {
+		s.markOmitted(fmt.Sprintf("request proof exceeded %d evidence records", maxTextRequestEvidencePerVar))
+		s.clearRequestVariable(scope, name)
+		return false
 	}
 	target := s.requestGlobal
 	if scope != "" {
@@ -215,11 +224,13 @@ func (s *textVariableState) setRequestVariable(scope, name string, destinations 
 		s.requestBindings++
 	}
 	target[name] = append([]string(nil), destinations...)
+	s.requestEvidence[textRequestKey{scope, name}] = mergeEvidenceIDs(evidenceIDs...)
 	s.requestBytes = newBytes
 	return true
 }
 
 func (s *textVariableState) clearRequestVariable(scope, name string) {
+	delete(s.requestEvidence, textRequestKey{scope, name})
 	target := s.requestGlobal
 	if scope != "" {
 		target = s.requestLocals[scope]
@@ -355,6 +366,13 @@ func lookupTextRequestVariable(values any, name string) ([]string, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func lookupTextRequestEvidence(values any, name string) []string {
+	if view, ok := values.(textRequestVariableView); ok && view.state != nil {
+		return view.state.requestEvidence[textRequestKey{view.scope, name}]
+	}
+	return nil
 }
 
 func textRequestVariableCount(values any) int {

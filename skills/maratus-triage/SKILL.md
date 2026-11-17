@@ -96,8 +96,9 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
 1. Read coverage and diagnostics first. Explain `partial` and `skipped` areas
    that affect the question. Even `analyzed` means completion of supported
    analysis, not complete recovery of all possible behavior.
-2. Inventory containers and selected artifacts. Containment alone is not
-   activation. Distinguish a declared execution root from an invoked target and
+2. Inventory containers and selected artifacts by their detected format, not
+   their extension. Include installer scripts, bundle declarations, and retained
+   embedded payloads. Containment alone is not activation. Distinguish a declared execution root from an invoked target and
    from unreferenced code.
 3. For developer artifacts, ask which supported host event selects the entry:
    package installation, Python site startup, a Cargo build script, an editor
@@ -115,7 +116,10 @@ or a report. Do not guess passwords or repeatedly raise limits to force a result
    are model states, not proof that code cannot run. Technical primitives and
    compiler/runtime support are not malicious intent or application ownership.
    `DIRECT`, `CORROBORATED`, and `HEURISTIC` describe static support, not severity.
-6. Embedded signing structure and page integrity do not establish certificate
+6. For native code, keep slices separate. Record relevant entry points,
+   initializers, linked libraries, and recovered call arguments where available.
+   A library declaration does not establish which file the loader will resolve.
+   Embedded signing structure and page integrity do not establish certificate
    trust, notarization, Gatekeeper approval, or benignness. No matches does not
    establish that an artifact is safe.
 
@@ -126,25 +130,23 @@ only for a specific diagnosed limitation within the user's authorized scope.
 Leave `--allow-dmg-mount` off unless explicitly authorized on a suitable isolated
 macOS host. Do not execute content to confirm a static hypothesis.
 
-## Return a concise triage note
+## Return a triage note
 
-Include:
+When drafting findings, use the [report template](references/report-template.md).
+Scale it to the question; omit inapplicable sections and never invent missing
+IDs, hashes, operands, or findings. Lead with the supported conclusion and its
+most material limitation. Cite canonical records and exact source locations.
+Keep observations, modeled behavior, and follow-up hypotheses distinct.
 
-- Input identity, producing build, settings, and saved-report location.
-- Supported activation conditions and selected targets, with node/root IDs.
-- Material capabilities and operations, citing canonical IDs and source
-  locations; keep mere observables in a separate list.
-- Coverage limits and unresolved operands that constrain each conclusion.
-- Targeted next questions for manual reverse engineering or endpoint telemetry,
-  clearly separated from facts established by Maratus.
+For manual reverse engineering, identify the exact member and architecture,
+function or callsite, and unresolved question. Validate arguments, receivers,
+and control flow in the disassembly; decompiler pseudocode is an interpretation,
+not recovered source. Attribute external observations to their own tool and
+input instead of presenting them as Maratus findings. Runtime questions need
+separate endpoint evidence or an independently authorized dynamic investigation.
 
-For a talk or shared report, redact private paths, credentials, and infrastructure
-before sharing. Do not upload artifacts or reports as part of this workflow.
-Present the result as initial static triage, not a malware verdict or a recovered
-runtime execution chain.
-
-Example conclusion: "The npm postinstall declaration selects this command;
-the report models a download piped to an interpreter. Cite the
-actual root, operation, and evidence IDs here. Whether installation occurred
-or the payload ran requires endpoint evidence." If the same command occurs
-only in a description or string, report the observation without that claim.
+Keep the original report private and intact. If sharing is authorized, redact a
+separate copy and identify it as redacted. Do not upload artifacts or reports,
+look up hashes online, or contact observed infrastructure as part of this skill.
+Present the result as initial static triage, not a malware verdict or proof of
+runtime execution.

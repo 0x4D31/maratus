@@ -100,3 +100,39 @@ func TestPythonLocalURLDoesNotEstablishNetworkOperation(t *testing.T) {
 		}
 	}
 }
+
+func TestPythonSplitDownloadRetainsRequestAndImportEvidence(t *testing.T) {
+	for name, test := range map[string]struct {
+		source string
+		lines  []int
+		absent int
+	}{
+		"split":      {"import requests\nr = requests.get(\"https://unit.invalid/p\")\nopen(\"/tmp/out\", \"wb\").write(r.content)\n", []int{1, 2, 3}, 0},
+		"reassigned": {"import requests\nr = requests.get(\"https://old.invalid/p\")\nr = requests.get(\"https://unit.invalid/p\")\nopen(\"/tmp/out\", \"wb\").write(r.content)\n", []int{1, 3, 4}, 2},
+		"function":   {"import requests as client\ndef collect():\n    r = client.get(\"https://unit.invalid/p\")\n    open(\"/tmp/out\", \"wb\").write(r.content)\n", []int{1, 3, 4}, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			graph := pythonAPIExtract(test.source)
+			downloads := pythonAPIOperationsByKind(graph, behavior.OperationNetworkDownload)
+			if len(downloads) != 1 {
+				t.Fatalf("downloads = %#v", downloads)
+			}
+			lines := map[int]bool{}
+			for _, id := range downloads[0].EvidenceIDs {
+				for _, evidence := range graph.Evidence {
+					if evidence.ID == id {
+						lines[evidence.Line] = true
+					}
+				}
+			}
+			for _, line := range test.lines {
+				if !lines[line] {
+					t.Errorf("download lacks causal evidence from line %d: %#v", line, downloads[0])
+				}
+			}
+			if test.absent != 0 && lines[test.absent] {
+				t.Fatalf("download inherited overwritten response evidence from line %d", test.absent)
+			}
+		})
+	}
+}

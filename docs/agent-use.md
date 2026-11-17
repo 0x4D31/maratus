@@ -4,7 +4,8 @@ The [`maratus-triage` skill](../skills/maratus-triage/SKILL.md) is a repeatable
 analysis procedure: create a private case, validate saved reports, follow
 summary findings to canonical evidence, and state what the static model cannot
 establish. It supplies decision rules and an output contract rather than a
-second CLI reference.
+second CLI reference. Its optional [report template](../skills/maratus-triage/references/report-template.md)
+keeps identity, conditional findings, evidence, and coverage together.
 
 ## Install the skill
 
@@ -66,3 +67,16 @@ checks for the agent, not a claim of compatibility testing inside every client:
 The skill cannot replace an isolated host, client permissions, or review of the
 agent's conclusions. See [security guidance](../SECURITY.md) and the
 [CLI reference](cli-output.md) for the underlying contracts.
+
+## Background reading
+
+Patrick Wardle's *The Art of Mac Malware*, Volume 1, provides useful background:
+
+- [Nonbinary Analysis](https://taomm.org/vol1/pdfs/CH%204%20Nonbinary%20Analysis.pdf): inspect packaging, declarations, scripts, and contained payloads.
+- [Binary Triage](https://taomm.org/vol1/pdfs/CH%205%20Binary%20Triage.pdf): use file identity, signing, libraries, and strings to guide investigation.
+- [Disassembly and Decompilation](https://taomm.org/vol1/pdfs/CH%206%20Disassembling%20%26%20Decompilation.pdf): investigate call arguments and control flow when triage leaves questions open.
+
+These chapters inform the workflow, not Maratus's coverage contract. Some book
+examples execute samples or use online services; neither is part of this skill.
+Use the technique ledger for supported analysis and retain per-slice findings,
+explicit uncertainty, and the distinction between signing structure and trust.
