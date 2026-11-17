@@ -78,6 +78,8 @@ flowchart TD
     D -->|Supported semantics| F[Operations, resources and relations]
     E -->|Static execution ownership| F
     F --> G[Capability rules]
+    D -.->|Scoped feature joins| G
+    E -.->|Execution-root joins| G
     C --> H[Validated report]
     D --> H
     E --> H
@@ -90,7 +92,9 @@ flowchart TD
 The artifact graph records containment. Separate host rules determine which
 retained code a declaration selects. Recognizers then model supported actions,
 such as reading a file or launching a process, and capability rules interpret
-those actions and their relationships.
+those actions and their relationships. Rules can also join scoped features and
+execution-root facts, but every capability match requires supporting operations.
+The diagram shows model dependencies, not a strict sequence of analysis passes.
 
 A URL alone remains an observable; it needs supporting call semantics to become
 a network operation. Likewise, a script inside an archive is not automatically

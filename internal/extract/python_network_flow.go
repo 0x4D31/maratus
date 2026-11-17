@@ -93,6 +93,7 @@ func pythonCallTailEmpty(tail string) bool {
 
 func invalidatePythonResponseUses(line string, state *textVariableState, scope string) {
 	code := pythonCodeContext(line)
+	targets := pythonBindingTargets(code)
 	requests := state.requestVariables(scope)
 	for index := 0; index < len(code); {
 		if !identifierStartByte(code[index]) {
@@ -109,7 +110,7 @@ func invalidatePythonResponseUses(line string, state *textVariableState, scope s
 			// its content. Only an unchanged content read preserves this proof.
 			suffix := code[end:]
 			contentEnd := end + len(".content")
-			if !strings.HasPrefix(suffix, ".content") || contentEnd < len(code) && (isIdentifierByte(code[contentEnd]) || code[contentEnd] == '(') || pythonRootedMemberMutation(code, index, end) {
+			if targets.contains(index) || !strings.HasPrefix(suffix, ".content") || contentEnd < len(code) && (isIdentifierByte(code[contentEnd]) || code[contentEnd] == '(') || pythonRootedMemberMutation(code, index, end) {
 				state.clearRequestVariable(scope, name)
 			}
 		}
