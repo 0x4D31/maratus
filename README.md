@@ -132,6 +132,10 @@ See [SECURITY.md](SECURITY.md) for handling and vulnerability reporting.
 
 ## Further reading
 
+- [Agent triage skill](skills/maratus-triage/SKILL.md): an evidence-first workflow
+  for agents. Load it explicitly from a trusted checkout, or copy the
+  `skills/maratus-triage` directory into your agent's supported skill directory.
+  It is self-contained; it does not install Maratus or enable sample hooks.
 - [CLI and output](docs/cli-output.md): options, report fields, and exit behavior
 - [Practical workflows](docs/use-cases.md): analysis and automation recipes
 - [Architecture](docs/architecture.md): pipeline, invariants, and package layout
