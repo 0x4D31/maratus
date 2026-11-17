@@ -93,7 +93,9 @@ jobs:
           # A fixed iteration budget avoids Go's fuzz-deadline cancellation
           # race (golang/go#75804). Go disables its test alarm during mutation,
           # so an outer timeout bounds each target; all nonzero exits fail CI.
-          for package in ./internal/artifact ./internal/extract ./internal/plistx ./internal/report ./internal/shellparse; do
+          # Discover packages so new parser packages cannot silently miss fuzzing.
+          packages=$(go list ./...)
+          for package in $packages; do
             targets=$(go test "$package" -list '^Fuzz')
             while IFS= read -r target; do
               case "$target" in
