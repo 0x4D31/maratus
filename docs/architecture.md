@@ -4,14 +4,44 @@ Maratus is a bounded static analyzer for macOS artifacts. Its central design
 choice is to keep artifact structure, execution semantics, extracted facts,
 modeled behavior, and capability rules as separate layers.
 
-The [overview diagram](../README.md#how-it-works) shows the data flow. Each
-layer also contributes its own records to the report; observations do not
-have to become operations to remain useful.
+Each layer contributes records to the report; observations do not have to
+become operations to remain useful.
 
 This separation prevents a useful clue from becoming a stronger claim by
 accident. A URL is evidence and a feature. A supported call may establish a
 network operation. A rule may interpret that operation as a capability. None
 of those records says the operation happened at runtime.
+
+## Analysis model
+
+```mermaid
+flowchart TD
+    A[App, package, archive, script or binary] --> B[Classify and expand within limits]
+    B --> C[Artifact graph]
+    C --> D[Located evidence and features]
+    C --> E[Declared entries and selected targets]
+    D -->|Supported semantics| F[Operations, resources and relations]
+    E -->|Static execution ownership| F
+    F --> G[Capability rules]
+    D -.->|Scoped feature joins| G
+    E -.->|Execution-root joins| G
+    C --> H[Validated report]
+    D --> H
+    E --> H
+    F --> H
+    G --> H
+    I[Coverage gaps and diagnostics] -.-> H
+    H --> J[Text, JSON or offline HTML]
+```
+
+The arrows show model dependencies, not a strict sequence of passes. Host
+selection and execution ownership are resolved across several passes. Rules
+may join scoped features and execution-root facts, but every capability match
+requires supporting operations. Coverage and diagnostics record work that was
+incomplete, unsupported, or skipped; they are essential when interpreting an
+absent finding.
+
+For one detailed packaging example, see [PyInstaller archive analysis](carchive-pyinstaller.md).
 
 ## Invariants
 

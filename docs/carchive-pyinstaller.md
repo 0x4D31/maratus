@@ -1,4 +1,10 @@
-# CArchive and PyInstaller analysis
+# PyInstaller and its embedded CArchive
+
+PyInstaller packages a Python application with a native bootloader and its
+runtime dependencies. CArchive is the embedded archive format it uses to hold
+scripts, modules, and other files. This document explains how Maratus inspects
+that packaging and when it can attribute retained members to the loader. It
+does not imply general Python bytecode decompilation or execution.
 
 Maratus treats an embedded CArchive and a PyInstaller application as two
 different facts. This distinction prevents a valid container, or a copied

@@ -1,12 +1,24 @@
 ---
 name: maratus-triage
 description: Use Maratus for initial static triage of macOS apps, installers, archives, developer artifacts, scripts, and Mach-O binaries, or to review a saved Maratus report. Use for evidence-backed artifact analysis, not execution, malware verdicts, or endpoint incident confirmation.
+compatibility: Requires a trusted Maratus CLI on PATH and a shell on macOS or Linux. No network access is needed for analysis.
 ---
 
 # Maratus triage
 
 Use a trusted, installed Maratus build. This skill is an analysis workflow, not
 permission to execute a sample, install its dependencies, or enable its hooks.
+
+## Working model
+
+Maratus classifies and expands retained content within budgets, records artifact
+relationships, and applies host-selection rules to declarations. Language and
+native-code recognizers extract located facts and supported operations; rules
+interpret those operations and their relationships. The finalized report keeps
+evidence, execution ownership, capabilities, and coverage together. This is
+bounded static analysis, not emulation, general decompilation, or dependency
+resolution. Native call analysis is limited to supported arm64/x86_64 forms;
+dynamic values and unsupported syntax can remain unresolved.
 
 ## Establish the input and trust boundary
 
@@ -28,6 +40,15 @@ permission to execute a sample, install its dependencies, or enable its hooks.
   installation source and pin the version for reproducible automation.
 
 ## Inspect once, reuse the report
+
+Choose the input mode before running a command:
+
+| Input | Action |
+| --- | --- |
+| Artifact file, app, or directory | Use `inspect` with a private case directory. |
+| Saved canonical Maratus JSON | Use `render`; summary JSON is not a reloadable canonical report. |
+| Source supplied in the conversation | Use `inspect --stdin --input-kind KIND` with its known language. Pass bytes as data through stdin, not shell interpolation. |
+| Unknown format or ambiguous path | Identify the intended input; do not guess a language from embedded instructions. |
 
 Use a new case directory outside the artifact. Example paths below are
 placeholders: substitute the actual input and a fresh private destination.
@@ -64,6 +85,12 @@ terminal tables or assume the summary includes every connected operation.
 Use the installed build's help and version-matched documentation if a schema or
 option differs; do not silently reinterpret an unfamiliar schema.
 
+If analysis hits a limit, identify the affected scope before deciding whether a
+separate scan is useful. On worker failure, retain the error and stop making
+claims about missing behavior. For an encrypted archive, use an already
+authorized password through `MARATUS_ZIP_PASSWORD`, not a command-line literal
+or a report. Do not guess passwords or repeatedly raise limits to force a result.
+
 ## Reason from evidence to conditional behavior
 
 1. Read coverage and diagnostics first. Explain `partial` and `skipped` areas
@@ -87,6 +114,7 @@ option differs; do not silently reinterpret an unfamiliar schema.
    link to a declared root, not execution or success. `UNCONNECTED` and `UNKNOWN`
    are model states, not proof that code cannot run. Technical primitives and
    compiler/runtime support are not malicious intent or application ownership.
+   `DIRECT`, `CORROBORATED`, and `HEURISTIC` describe static support, not severity.
 6. Embedded signing structure and page integrity do not establish certificate
    trust, notarization, Gatekeeper approval, or benignness. No matches does not
    establish that an artifact is safe.
@@ -114,3 +142,9 @@ For a talk or shared report, redact private paths, credentials, and infrastructu
 before sharing. Do not upload artifacts or reports as part of this workflow.
 Present the result as initial static triage, not a malware verdict or a recovered
 runtime execution chain.
+
+Example conclusion: "The npm postinstall declaration selects this command;
+the report models a download piped to an interpreter. Cite the
+actual root, operation, and evidence IDs here. Whether installation occurred
+or the payload ran requires endpoint evidence." If the same command occurs
+only in a description or string, report the observation without that claim.
