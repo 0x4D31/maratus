@@ -722,12 +722,13 @@ func pythonIdentifierPositions(code, name string) []int {
 }
 
 func pythonStableBindingUsesOnlyQualifiedReads(code, name string) bool {
+	targets := pythonBindingTargets(code)
 	for _, position := range pythonIdentifierPositions(code, name) {
 		if position > 0 && code[position-1] == '.' {
 			continue
 		}
 		cursor := pythonSkipHorizontal(code, position+len(name))
-		if cursor >= len(code) || code[cursor] != '.' || pythonRootedMemberMutation(code, position, cursor) {
+		if cursor >= len(code) || code[cursor] != '.' || targets.contains(position) || pythonRootedMemberMutation(code, position, cursor) {
 			return false
 		}
 	}
@@ -746,6 +747,9 @@ func pythonRootedMemberMutation(code string, root, dot int) bool {
 		if !ok {
 			return true
 		}
+		if code[cursor:next] == "__dict__" {
+			return true
+		}
 		cursor = pythonSkipHorizontal(code, next)
 	}
 	for _, operator := range []string{"**=", "//=", "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "@=", "&=", "|=", "^=", ":="} {
@@ -754,6 +758,77 @@ func pythonRootedMemberMutation(code string, root, dot int) bool {
 		}
 	}
 	return strings.HasPrefix(code[cursor:], "=") && !strings.HasPrefix(code[cursor:], "==")
+}
+
+// A member write need not place '=' immediately after the member: unpacking,
+// parentheses, for targets, and with aliases also bind attributes. Scan the
+// already bounded, string-masked line conservatively; this is not a Python
+// evaluator. Nested keyword arguments and comparisons are not assignments.
+type pythonBindingTargetRanges [][2]int
+
+func (ranges pythonBindingTargetRanges) contains(position int) bool {
+	for _, span := range ranges {
+		if span[0] <= position && position < span[1] {
+			return true
+		}
+	}
+	return false
+}
+
+func pythonBindingTargets(code string) pythonBindingTargetRanges {
+	var targets pythonBindingTargetRanges
+	depth := 0
+	targetStart := 0
+	forStart := -1
+	asStart := -1
+	trimmed := strings.TrimSpace(code)
+	if strings.HasPrefix(trimmed, "del ") || strings.HasPrefix(trimmed, "del\t") {
+		return pythonBindingTargetRanges{{0, len(code)}}
+	}
+	for index := 0; index < len(code); index++ {
+		if len(targets) >= maxPythonAPICallsPerLine {
+			return pythonBindingTargetRanges{{0, len(code)}}
+		}
+		switch code[index] {
+		case '(', '[', '{':
+			depth++
+		case ')', ']', '}':
+			depth--
+		case ':', ',':
+			if depth == 0 && asStart >= 0 {
+				targets = append(targets, [2]int{asStart, index})
+				asStart = -1
+			}
+		case '=':
+			if depth == 0 && (index == 0 || !strings.ContainsRune("=!<>:", rune(code[index-1]))) && (index+1 == len(code) || code[index+1] != '=') {
+				targets = append(targets, [2]int{targetStart, index})
+				targetStart = index + 1
+			}
+		}
+		if !identifierStartByte(code[index]) {
+			continue
+		}
+		end := index + 1
+		for end < len(code) && isIdentifierByte(code[end]) {
+			end++
+		}
+		switch code[index:end] {
+		case "for":
+			forStart = end
+		case "in":
+			if forStart >= 0 {
+				targets = append(targets, [2]int{forStart, index})
+			}
+			forStart = -1
+		case "as":
+			asStart = end
+		}
+		index = end - 1
+	}
+	if asStart >= 0 {
+		targets = append(targets, [2]int{asStart, len(code)})
+	}
+	return targets
 }
 
 func (bindings *pythonStableAPIBindings) bindingEvidence(graph *behavior.Graph, content artifact.Content, name string) string {

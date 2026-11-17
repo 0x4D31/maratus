@@ -612,3 +612,45 @@ func TestPythonNetworkRetainsImportAndCallLineage(t *testing.T) {
 		})
 	}
 }
+
+func TestPythonMemberBindingTargetsInvalidateAPIIdentity(t *testing.T) {
+	for _, mutation := range []string{
+		"API, other = fake, None",
+		"(API) = fake",
+		"[API, other] = [fake, None]",
+		"other = API = fake",
+		"for API in replacements:\n    pass",
+		"with context() as API:\n    pass",
+		"del (API)",
+		"MODULE.__dict__[\"MEMBER\"] = fake",
+	} {
+		for _, api := range []string{"os.remove", "requests.get", "subprocess.run"} {
+			t.Run(api+"/"+mutation, func(t *testing.T) {
+				parts := strings.Split(api, ".")
+				statement := strings.NewReplacer("API", api, "MODULE", parts[0], "MEMBER", parts[1]).Replace(mutation)
+				source := "import " + parts[0] + "\n" + statement + "\n" + api + "(\"https://unit.invalid/payload\")\n"
+				graph := pythonAPIExtract(source)
+				if len(graph.Operations) != 0 {
+					t.Fatalf("mutated API acquired original semantics: %#v", graph.Operations)
+				}
+			})
+		}
+	}
+}
+
+func TestPythonMemberReadsPreserveAPIIdentity(t *testing.T) {
+	for _, read := range []string{
+		"alias = os.remove",
+		"same = os.remove == other",
+		"check(value=os.remove)",
+		"values = [os.remove for value in items]",
+		"with context() as handle: check(os.remove)",
+	} {
+		t.Run(read, func(t *testing.T) {
+			graph := pythonAPIExtract("import os\n" + read + "\nos.remove(\"/tmp/a\")\n")
+			if len(pythonAPIOperationsByKind(graph, behavior.OperationFileDelete)) != 1 {
+				t.Fatalf("ordinary member read invalidated API: %#v", graph.Operations)
+			}
+		})
+	}
+}
