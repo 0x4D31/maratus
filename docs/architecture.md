@@ -4,15 +4,9 @@ Maratus is a bounded static analyzer for macOS artifacts. Its central design
 choice is to keep artifact structure, execution semantics, extracted facts,
 modeled behavior, and capability rules as separate layers.
 
-```text
-hostile input
-  -> artifact graph
-  -> execution roots and invoked targets
-  -> evidence and scoped features
-  -> operations, resources, and relations
-  -> capability matches
-  -> validated report and presentation
-```
+The [overview diagram](../README.md#how-it-works) shows the data flow. Each
+layer also contributes its own records to the report; observations do not
+have to become operations to remain useful.
 
 This separation prevents a useful clue from becoming a stronger claim by
 accident. A URL is evidence and a feature. A supported call may establish a
