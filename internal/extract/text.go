@@ -331,7 +331,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			}
 			var end int
 			var incomplete bool
-			semanticRaw, line, end, incomplete = joinPythonLexicalDeclaration(
+			semanticRaw, line, end, incomplete = joinPythonLogicalLine(
 				lines,
 				i,
 				semanticRaw,
@@ -344,7 +344,7 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 					content.NodeID,
 					"python-lexical-scope-analysis",
 					fmt.Sprintf(
-						"Python declaration header exceeded %d lines or %d bytes; remaining source semantics were not inferred",
+						"Python logical statement exceeded %d lines or %d bytes, or was unterminated; remaining source semantics were not inferred",
 						maxSemanticContinuationLines,
 						maxSemanticContinuationBytes,
 					),
@@ -470,6 +470,10 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			if bindingName, stable := pythonAPIBindings.stableSubprocessCallBinding(semanticLine, lineNo); stable {
 				pythonSubprocessBound = true
 				pythonStableSubprocessBinding = bindingName
+			}
+			if pythonOrderedBindings.mutatedModules["subprocess"] {
+				pythonSubprocessBound = false
+				pythonStableSubprocessBinding = ""
 			}
 			if pythonClassBody {
 				addPartialCoverageOnce(
@@ -606,19 +610,12 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
 			break
 		}
-		if name, destinations, ok := languageNetworkAssignmentWithDestinations(language, networkSemanticLine, networkDestinations); ok {
-			variableState.setRequestVariable(scopeKey, name, destinations)
-			requestVars = variableState.requestVariables(scopeKey)
-		}
-		if variableState.limited {
-			addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
-			break
-		}
+		requestName, requestDestinations, requestAssigned := languageNetworkAssignmentWithDestinations(language, networkSemanticLine, networkDestinations)
 		requestWriteLine := analysisLine
 		if language == "python" {
 			requestWriteLine = semanticLine
 		}
-		requestWriteTarget, requestWriteDestinations, requestWriteOK := languageRequestWriteTargetBudget(language, requestWriteLine, requestVars, vars, lineBudget)
+		requestWriteTarget, requestWriteDestinations, requestWriteEvidence, requestWriteOK := languageRequestWriteTargetBudget(language, requestWriteLine, requestVars, vars, lineBudget)
 		if language == "python" {
 			requestWriteOK = requestWriteOK && pythonAPIBindings.builtinOpenSafe
 			inlineWriteOK := networkCall && pythonAPIBindings.builtinOpenSafe && languageDownloadTargetBudget(language, networkSemanticLine, vars, lineBudget) != ""
@@ -663,6 +660,13 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 			}
 			lineContent.SupportingEvidenceIDs = append(lineContent.SupportingEvidenceIDs, bindingEvidenceID)
 		}
+		if requestAssigned {
+			variableState.setRequestVariable(scopeKey, requestName, requestDestinations, append([]string{evidenceID}, lineContent.SupportingEvidenceIDs...)...)
+			if variableState.limited {
+				addPartialCoverageOnce(graph, content.NodeID, "text-variable-analysis", variableState.coverageDetail())
+				break
+			}
+		}
 		addDirectFunctionCallFeatures(graph, lineContent, directCalls, evidenceID)
 		addStaticAssignedURLs(graph, lineContent, language, assignedURLs, evidenceID)
 		extractSensitiveResourceFeaturesBudget(graph, lineContent, language, analysisLine, lineNo, evidenceID, lineBudget)
@@ -680,7 +684,9 @@ func ExtractText(graph *behavior.Graph, content artifact.Content) {
 				extractResolvedLanguageNetworkBudget(graph, lineContent, language, networkSemanticLine, analysisLine, networkDestinations, lineNo, evidenceID, lineBudget, pythonAPIBindings.builtinOpenSafe, vars)
 			}
 			if requestWriteOK {
-				extractResolvedLanguageRequestWrite(graph, lineContent, language, requestWriteTarget, requestWriteDestinations, lineNo, evidenceID)
+				requestContent := lineContent
+				requestContent.SupportingEvidenceIDs = mergeEvidenceIDs(append(append([]string(nil), lineContent.SupportingEvidenceIDs...), requestWriteEvidence...)...)
+				extractResolvedLanguageRequestWrite(graph, requestContent, language, requestWriteTarget, requestWriteDestinations, lineNo, evidenceID)
 			}
 			extractLanguageFileModeBudget(graph, lineContent, language, analysisLine, lineNo, evidenceID, lineBudget)
 			invocation, ok, incomplete := javascriptProcess.invocation, javascriptProcess.candidate && !javascriptProcess.incomplete, javascriptProcess.incomplete
@@ -1955,7 +1961,18 @@ const (
 // causing the dormant body to be analyzed as module execution. An incomplete
 // header fails closed because its body boundary cannot be established safely.
 func joinPythonLexicalDeclaration(lines []string, start int, firstRaw, first string, inBlockComment *bool) (string, string, int, bool) {
-	if _, _, declared := pythonLexicalDeclarationStart(first); !declared || bracketDepth(first) <= 0 {
+	if _, _, declared := pythonLexicalDeclarationStart(first); !declared {
+		return firstRaw, first, start, false
+	}
+	return joinPythonLogicalLine(lines, start, firstRaw, first, inBlockComment)
+}
+
+// Binding targets can span physical lines just like calls and declarations.
+// Reconstruct one bounded logical statement before inspecting scope or writes.
+func joinPythonLogicalLine(lines []string, start int, firstRaw, first string, inBlockComment *bool) (string, string, int, bool) {
+	if !pythonLogicalLineContinues(first) || parsePythonImportLine(first).disposition != pythonImportAbsent {
+		// Continued imports retain their existing observational parser. A
+		// flattened import would give its bindings incorrect byte offsets.
 		return firstRaw, first, start, false
 	}
 
@@ -1973,14 +1990,23 @@ func joinPythonLexicalDeclaration(lines []string, start int, firstRaw, first str
 		if total > maxSemanticContinuationBytes {
 			return indent + strings.Join(parts, " "), strings.Join(parts, " "), last, true
 		}
+		lastPart := len(parts) - 1
+		if strings.HasSuffix(strings.TrimSpace(pythonCodeContext(parts[lastPart])), "\\") {
+			parts[lastPart] = strings.TrimSuffix(strings.TrimSpace(parts[lastPart]), "\\")
+		}
 		parts = append(parts, next)
 		joined := strings.Join(parts, " ")
-		if bracketDepth(joined) <= 0 {
+		if !pythonLogicalLineContinues(joined) {
 			return indent + joined, joined, index, false
 		}
 	}
 	joined := strings.Join(parts, " ")
 	return indent + joined, joined, last, true
+}
+
+func pythonLogicalLineContinues(line string) bool {
+	code := pythonCodeContext(line)
+	return bracketDepth(code) > 0 || strings.HasSuffix(strings.TrimSpace(code), "\\")
 }
 
 func joinSemanticContinuation(language string, lines []string, start int, first string, inBlockComment *bool) (string, int) {
@@ -2188,37 +2214,37 @@ func extractResolvedLanguageRequestWrite(graph *behavior.Graph, content artifact
 	graph.AddNetworkImplementation(observation)
 }
 
-func languageRequestWriteTargetBudget(language, line string, requestVars, vars any, budget *textLineBudget) (string, []string, bool) {
+func languageRequestWriteTargetBudget(language, line string, requestVars, vars any, budget *textLineBudget) (string, []string, []string, bool) {
 	if textRequestVariableCount(requestVars) == 0 {
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	lower := strings.ToLower(line)
 	switch language {
 	case "python":
 		target, body, ok := pythonResponseWrite(line, vars)
 		if !ok || !strings.HasSuffix(body, ".content") {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		name := strings.TrimSuffix(body, ".content")
 		if identifierName(name) {
 			destinations, found := lookupTextRequestVariable(requestVars, name)
-			return target, destinations, found
+			return target, destinations, lookupTextRequestEvidence(requestVars, name), found
 		}
 	case "javascript", "jxa":
 		if !javascriptFileWrite(lower) || !javascriptResponseBodyMarker(lower) {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		target := firstJavaScriptWritePathBudget(line, lower, budget)
 		if target == "" {
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		name := firstRequestVariableWithSuffix(line, requestVars, javascriptResponseSuffix)
 		if name != "" {
 			destinations, _ := lookupTextRequestVariable(requestVars, name)
-			return target, destinations, true
+			return target, destinations, lookupTextRequestEvidence(requestVars, name), true
 		}
 	}
-	return "", nil, false
+	return "", nil, nil, false
 }
 
 func firstRequestVariableWithSuffix(line string, requestVars any, accepts func(string) bool) string {

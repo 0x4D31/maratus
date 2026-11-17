@@ -320,3 +320,23 @@ func assertTextDownloadDestination(t *testing.T, graph behavior.Graph, target, d
 	}
 	t.Fatalf("missing download target %q associated with destination %q: operations=%#v network=%#v", target, destination, graph.Operations, graph.Network)
 }
+
+func TestRequestEvidenceBudgetDropsStaleProof(t *testing.T) {
+	state := newTextVariableState()
+	proof := make([]string, maxTextRequestEvidencePerVar)
+	for i := range proof {
+		proof[i] = "evidence-" + strconv.Itoa(i)
+	}
+	if !state.setRequestVariable("scope", "response", []string{"https://unit.invalid/p"}, proof...) {
+		t.Fatal("exact evidence limit rejected")
+	}
+	if got := lookupTextRequestEvidence(state.requestVariables("scope"), "response"); len(got) != len(proof) {
+		t.Fatalf("retained proof length = %d", len(got))
+	}
+	if state.setRequestVariable("scope", "response", []string{"https://new.invalid/p"}, append(proof, "extra")...) {
+		t.Fatal("over-limit request proof accepted")
+	}
+	if _, found := lookupTextRequestVariable(state.requestVariables("scope"), "response"); found || len(state.requestEvidence) != 0 || state.omittedCoverageDetail() == "" {
+		t.Fatal("over-limit reassignment retained stale destinations or evidence, or omitted coverage")
+	}
+}
